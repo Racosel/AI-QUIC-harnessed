@@ -11,6 +11,7 @@
   - 开始时就引入`quic-interop-runner`等测试环境，每完成一步都要在测试环境里验证，确保实现的正确性和兼容性。（AI生成的测试例可以用，但无法信任）
   - 考虑使用内嵌在VS Code中的~~SonarQube~~ [MegaLinter](https://megalinter.io/)（免费），以及CMake的Sanitizer作为代码规范等检查体系，在出错时提供更多信息，供Agent排查使用，确保代码质量和可维护性。
     - `MegaLinter`：集成环境，自动运行`clang-tidy`、`Clang-Format`、`Cppcheck`、`Sparse`等
+    - `npx mega-linter-runner --fix`
   - 从开始就加入`qlog`扩展，保证详细的日志记录，确保在出现问题时能够快速定位和修复。
 
 3. Agent自修复和审计
