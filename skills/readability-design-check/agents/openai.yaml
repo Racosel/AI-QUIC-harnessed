@@ -1,0 +1,4 @@
+interface:
+  display_name: "Readability Design Check"
+  short_description: "Periodic readability and design review"
+  default_prompt: "Use $readability-design-check to review the current code changes for readability, maintainability, and design issues before they become expensive to fix."

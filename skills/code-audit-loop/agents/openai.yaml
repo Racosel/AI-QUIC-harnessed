@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Audit Loop"
+  short_description: "Coordinate audit review and follow-up fixes"
+  default_prompt: "Use $code-audit-loop to decide whether this change needs an audit, hand off to an audit agent, and implement one follow-up fix from the report."
