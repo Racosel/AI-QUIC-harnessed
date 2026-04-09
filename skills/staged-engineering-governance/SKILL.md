@@ -42,6 +42,35 @@ Use this skill when any of the following are true:
 - If the most convenient fix is outside the owned code boundary, surface that boundary instead of silently crossing it.
 - If the repository already defines protected directories or files, follow that policy exactly.
 
+#### AI-QUIC 代码目录边界：`ai-quic/`
+
+在 AI-QUIC 仓库中，所有新的开发代码和测试代码都应放在仓库根目录下的 `ai-quic/` 中，不允许直接放在仓库根目录。
+
+- 新增源码、测试、测试夹具、辅助脚本、构建相关代码目录时，默认都放在 `ai-quic/` 下组织，不要在仓库根目录直接新建同类目录或文件。
+- 除非用户明确要求，不能把新的开发代码或测试代码直接放到仓库根目录。
+- `docs/`、`skills/`、`log`、`debug`、`break`、仓库根目录 `Makefile` 这类文档、治理或仓库级入口文件不属于此限制，可以继续放在现有位置。
+- 如果仓库中已经存在历史代码目录、第三方目录或外部项目目录，不要因为这条规则自动搬迁它们；只有在用户明确要求迁移时才调整。
+- 当任务需要新增 repo-owned 的实现或测试时，先检查 `ai-quic/` 是否存在；若不存在，应优先在该目录下创建，再继续后续实现。
+- 如果某项改动同时涉及 `ai-quic/` 与仓库根目录的新代码落点，默认视为违反目录边界，先收敛到 `ai-quic/` 方案，再继续实施。
+
+#### AI-QUIC 仓库级操作入口：根目录 `Makefile`
+
+为了简化部分重复操作，可以在仓库根目录建立并维护一个 `Makefile`，作为常用命令入口。
+
+- 根目录 `Makefile` 属于仓库级工作流入口，不视为把新的开发代码直接放到仓库根目录。
+- 仅把稳定、可复用、值得降低操作成本的命令收敛进 `Makefile`；一次性的临时调试命令不要长期固化。
+- 当常用操作、默认参数或底层脚本入口发生变化时，同步更新 `Makefile`，避免它和真实流程脱节。
+- 若目标依赖高权限、外部环境或用户手工步骤，应在目标名或注释中明确说明，不要伪装成完全自动的一键完成。
+
+#### AI-QUIC 新设计执行职责
+
+在 AI-QUIC 仓库中，agent 的默认职责边界如下：
+
+- 先以 `docs/` 为约束来源开展设计与实现；开始编码前，优先读取相关的 `docs/plans/`、`docs/quic-interop-runner/`、`docs/ietf/notes/`。
+- `xquic/` 是参考实现与结构对照物，用于借鉴模块划分、接口组织、最小运行路径与观测点；除非用户明确要求，不把新的设计直接落到 `xquic/`。
+- 所有 repo-owned 的新设计、实现、测试与 interop 包装，都应放在 `ai-quic/` 下完成；若 `ai-quic/` 尚不存在，先创建最小骨架，再继续实现。
+- 当 `docs/` 与 `xquic/` 的现有实现不一致时，以 `docs/` 和用户最新要求为准；若 `docs/` 缺口过大，应先记录缺口并同步规划文档，再继续设计。
+
 ### 3. Separate Validation Levels
 
 Treat validation as a ladder, not a binary:
@@ -96,6 +125,19 @@ Prefer reusing existing project artifacts for persistent memory. If the repo alr
 - Handoff note: current checkpoint and next actions
 
 If the repo does not use these patterns, do not create noise by inventing all of them automatically. Add only what is justified by task length, failure complexity, and the user's workflow.
+
+#### AI-QUIC 状态文档：`docs/plans/process.md`
+
+在 AI-QUIC 仓库中，如果任务需要持续维护“阶段规划、完成状态、完成判定”，`docs/plans/process.md` 是默认的状态文档。更新时遵循以下规则：
+
+- 先读取 `docs/plans/process.md`，再与 `docs/plans/plan-quic.md`、`docs/plans/plan-general.md`、当前代码和当前验证证据进行对照，避免只按记忆改状态。
+- 沿用仓库现有的阶段命名、依赖顺序和验收表述；除非用户明确要求，不要另起一套并行计划体系。
+- 当阶段或条目出现以下任一变化时更新：新建、拆分、开始、阻塞、范围调整、完成局部实现、完成本地验证、完成高保真验证、确认完成。
+- 状态不要只写“完成/未完成”；优先使用更精确的状态，例如 `未开始`、`进行中`、`阻塞`、`已本地验证`、`已高保真验证`、`已完成`，或文件中已经采用的等价中文表述。
+- 每个条目至少写清：当前状态、完成判定、已具备的证据、仍未验证或仍受阻的部分。
+- 代码提交或局部通过测试，不等于阶段完成；如果目标验证层级尚未达到，就写出当前最强但仍真实的状态，不得提前标记“已完成”。
+- 如果只完成了阶段中的一部分，就更新对应子项或备注，不要把整个阶段一起标成完成。
+- 如果 `docs/plans/process.md` 还是空白文件，先按现有阶段规划初始化，再逐步补充状态；不要从零发明与仓库现有规划脱节的新大纲。
 
 ### 3. Plan By Stage Or Capability
 
@@ -173,6 +215,21 @@ The agent must not assume ownership of:
 - redefining the acceptance bar
 - modifying out-of-scope components for convenience
 - weakening negative findings to make progress appear smoother
+
+#### AI-QUIC 决策升级规则（强制）
+
+在 AI-QUIC 仓库中，遇到以下任一情况时，必须交由用户判断，并等待用户回答后再执行：
+
+- 出现任何关键问题或阻塞，且存在多条可行处理路径。
+- 对需求、边界、验收标准、风险归因存在不确定性。
+- 需要做较大的设计决策，例如模块边界调整、接口语义变化、目录结构重排、验证口径切换。
+- 需要在多种实现方案之间取舍，且取舍会明显影响后续实现成本、兼容性或可维护性。
+
+执行要求：
+
+- 先明确说明不确定点、可选方案、主要影响与推荐选项。
+- 在用户给出明确回答前，不继续执行该决策相关实现。
+- 用户答复后，按用户选择继续推进，并在状态文档或日志中记录决策结论。
 
 ## Reporting Rules
 
