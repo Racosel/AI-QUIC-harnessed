@@ -1,6 +1,5 @@
-# demo
+# 示例程序目录（demo）
 
-Local demo client/server programs go here.
+该目录用于放置本地 demo 客户端与服务端程序。
 
-Use this directory for minimal runnable flows and smoke checks.
-
+用于承载最小可运行链路与烟雾验证入口。

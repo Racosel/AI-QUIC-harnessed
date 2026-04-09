@@ -1,16 +1,15 @@
-# ai-quic framework
+# ai-quic 框架说明
 
-This directory hosts the new AI-QUIC implementation.
+本目录用于承载新的 AI-QUIC 实现。
 
-Design constraints:
+设计约束：
 
-- Follow `docs/` as the source of truth for scope and acceptance.
-- Use `xquic/` as a reference for module boundaries and flow.
-- Land all new repo-owned implementation work under `ai-quic/`.
+- 以 `docs/` 作为范围和验收标准的事实依据。
+- 以 `xquic/` 作为模块边界与流程参考。
+- 所有新的仓库自有实现都落在 `ai-quic/` 下。
 
-Current status:
+当前状态：
 
-- Directory skeleton is initialized.
-- Build entry is available via `CMakeLists.txt`.
-- Protocol logic is not implemented yet.
-
+- 目录骨架已初始化。
+- 已提供 `CMakeLists.txt` 构建入口。
+- 协议逻辑尚未实现。

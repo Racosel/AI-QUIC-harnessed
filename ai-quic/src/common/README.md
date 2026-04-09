@@ -1,11 +1,10 @@
-# common
+# 公共基础模块（common）
 
-Shared utility code for AI-QUIC goes here.
+该目录用于放置 AI-QUIC 的公共基础能力代码。
 
-Examples:
+示例：
 
-- logging
-- time helpers
-- buffer and container utilities
-- reusable helper APIs
-
+- 日志能力
+- 时间辅助能力
+- 缓冲区与容器工具
+- 可复用的基础辅助接口

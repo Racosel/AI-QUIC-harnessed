@@ -1,12 +1,11 @@
-# transport
+# 传输层模块（transport）
 
-QUIC transport core goes here.
+该目录用于放置 QUIC 传输层核心实现。
 
-Planned areas:
+规划范围：
 
-- connection and state machine
-- packet and frame parsing/serialization
-- stream handling
-- ACK, loss recovery, PTO
-- transport parameters and CID/path management
-
+- 连接与状态机
+- 包与帧的解析与编码
+- 流处理
+- ACK、丢包恢复、PTO
+- 传输参数与 CID/路径管理

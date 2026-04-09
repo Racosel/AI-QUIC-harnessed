@@ -1,6 +1,5 @@
-# unittest
+# 单元测试目录（unittest）
 
-Unit tests for AI-QUIC modules go here.
+该目录用于放置 AI-QUIC 各模块的单元测试。
 
-Keep tests close to module boundaries and protocol invariants.
-
+测试应尽量贴近模块边界与协议不变量。

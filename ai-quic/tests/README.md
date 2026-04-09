@@ -1,8 +1,7 @@
-# tests
+# 测试入口目录（tests）
 
-Test entry for AI-QUIC.
+AI-QUIC 测试入口目录。
 
-Subdirectories:
+子目录：
 
-- `unittest/` for narrow unit and component tests
-
+- `unittest/`：窄范围单元测试与组件级测试

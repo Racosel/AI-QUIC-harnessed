@@ -1,6 +1,5 @@
-# http3
+# HTTP/3 模块（http3）
 
-HTTP/3 and QPACK related code goes here.
+该目录用于放置 HTTP/3 与 QPACK 相关实现。
 
-This module is not part of step01 handshake minimum scope.
-
+该模块不属于步骤01 `handshake` 的最小范围。

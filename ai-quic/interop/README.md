@@ -1,10 +1,9 @@
-# interop
+# 互操作入口目录（interop）
 
-Interop runner integration files go here.
+该目录用于放置与 interop runner 对接的文件。
 
-Examples:
+示例：
 
-- endpoint startup scripts
+- 端点启动脚本
 - Dockerfile
-- testcase-specific wrappers
-
+- 测试用例定制包装脚本

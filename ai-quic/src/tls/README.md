@@ -1,10 +1,9 @@
-# tls
+# TLS 对接模块（tls）
 
-QUIC and TLS integration layer goes here.
+该目录用于放置 QUIC 与 TLS 的对接层实现。
 
-Planned areas:
+规划范围：
 
-- TLS handshake driving through CRYPTO frames
-- key derivation and key installation lifecycle
-- TLS backend adapters and context management
-
+- 通过 `CRYPTO` 帧驱动 TLS 握手
+- 密钥派生、安装与生命周期管理
+- TLS 后端适配与上下文管理

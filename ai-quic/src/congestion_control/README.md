@@ -1,10 +1,9 @@
-# congestion_control
+# 拥塞控制模块（congestion_control）
 
-Congestion control algorithms and sampling helpers go here.
+该目录用于放置拥塞控制算法与采样辅助能力。
 
-Examples:
+示例：
 
 - NewReno
 - Cubic
-- BBR family
-
+- BBR 系列
