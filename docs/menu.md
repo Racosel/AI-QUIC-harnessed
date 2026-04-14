@@ -12,6 +12,8 @@
 |:-----------------------------|:------------------------------------------------------------------------------------------------|:---------------------------------------|
 | 规划 QUIC 实现阶段与验收路径 | `docs/plans/plan-quic.md` + `docs/quic-interop-runner/quic-test-cases.md`                       | 先定阶段目标，再对齐测试用例映射。       |
 | 规划步骤01最小握手闭环       | `docs/plans/step01-handshake-doc-index.md` + `docs/quic-interop-runner/quic-test-cases.md`     | 先锁定握手边界，再补运行与协议约束。     |
+| 审查步骤01代码逻辑设计       | `docs/plans/step01-handshake-logic-design.md` + `docs/plans/repo-file-hierarchy.md`            | 编码前先锁定模块落点、状态机和阻断决策。 |
+| 查阅 BoringSSL 接入资料      | `docs/boringssl/README.md` + `docs/boringssl/porting.md`                                        | 先看索引，再按迁移/构建/API 约束落地。   |
 | 规划仓库代码层级与模块落点   | `docs/plans/repo-file-hierarchy.md` + `docs/plans/plan-quic.md`                                 | 先确认目录边界，再决定代码与测试落点。   |
 | 互操作测试执行/排障          | `docs/quic-interop-runner/how-to-run.md` + `docs/quic-interop-runner/implement-requirements.md` | 先确认运行机制，再确认退出码约束。       |
 | 选择对比实现与镜像           | `docs/quic-interop-runner/quic-implement-images.md`                                             | 快速确认可用实现、镜像与角色。           |
@@ -31,6 +33,7 @@
   - `docs/quic-interop-runner/quic-test-cases.md`
 - 何时升级：
   - 若当前已明确推进步骤01，再读 `docs/plans/step01-handshake-doc-index.md`。
+  - 若即将编码步骤01，先读 `docs/plans/step01-handshake-logic-design.md` 完成设计审查。
   - 若需要决定新代码、新测试或 interop 入口应落在哪个目录，再读 `docs/plans/repo-file-hierarchy.md`。
   - 若涉及团队流程/审计体系，再读 `docs/plans/plan-ai.md`。
 
@@ -58,6 +61,15 @@
 - 何时升级：
   - 需要具体 Linter Key 时，再读 `docs/mega-linter/linter-list.md`。
 
+### 阅读包 E：BoringSSL 对接
+- 默认读取：
+  - `docs/boringssl/README.md`
+  - `docs/boringssl/porting.md`
+- 何时升级：
+  - 需要构建细节时，追加 `docs/boringssl/building.md`。
+  - 需要接口约束时，追加 `docs/boringssl/api-conventions.md` 与 `docs/boringssl/public-headers.md`。
+  - 需要升级评估时，追加 `docs/boringssl/breaking-changes.md`。
+
 ## 区块 3：全量文档索引表
 
 > 说明：优先级以“排障/实现落地价值”为准。
@@ -71,7 +83,19 @@
 | `docs/menu.md`                                          | P0               | `docs/` 统一检索入口与路由规则             | 任何文档检索任务开始前               | 先读                          |
 | `docs/plans/plan-quic.md`                               | P0               | QUIC 实现 8 阶段规划、模块划分、验收目标     | 需要制定实现计划或确认阶段目标       | 先读                          |
 | `docs/plans/step01-handshake-doc-index.md`              | P0               | 步骤01握手最小闭环的专项文档目录与阅读顺序   | 已进入步骤01规划、实现或排障          | 先读（步骤01专项）            |
+| `docs/plans/step01-handshake-logic-design.md`           | P0               | 步骤01路径1的代码逻辑设计与待拍板决策        | 准备进入步骤01编码前的设计审查        | 先读（编码前）                |
 | `docs/plans/repo-file-hierarchy.md`                     | P0               | 当前仓库层级、建议中的 `ai-quic/` 目录与 `xquic` 模块映射 | 需要决定代码目录落点或建立实现骨架 | 先读（目录规划）              |
+| `docs/boringssl/README.md`                              | P0               | BoringSSL 导读索引与阅读顺序                 | 需要接入或排障 BoringSSL 相关问题     | 先读（BoringSSL）             |
+| `docs/boringssl/porting.md`                             | P1               | OpenSSL 到 BoringSSL 的迁移要点              | 迁移 TLS 代码或修 API 兼容问题        | 后读（在索引后）              |
+| `docs/boringssl/building.md`                            | P1               | BoringSSL 构建、测试、基准执行要点           | 构建 boringssl 本体或验证工具链       | 后读                          |
+| `docs/boringssl/incorporating.md`                       | P1               | BoringSSL 纳入项目的分支/目录/符号策略       | 设计仓库集成方式与升级策略            | 后读                          |
+| `docs/boringssl/api-conventions.md`                     | P1               | BoringSSL API 语义与生命周期约定             | 设计 TLS 适配层接口与错误处理         | 后读                          |
+| `docs/boringssl/public-headers.md`                      | P1               | `include/openssl` 公共头文件检索入口         | 需要精确函数与类型语义                | 后读                          |
+| `docs/boringssl/style.md`                               | P2               | BoringSSL 代码风格规则                       | 同步上游补丁或规范周边适配代码        | 后读（专项）                  |
+| `docs/boringssl/fuzzing.md`                             | P2               | BoringSSL Fuzz 构建与运行要点                | 需要补充 fuzz 验证时                  | 后读（专项）                  |
+| `docs/boringssl/contributing.md`                        | P2               | 向 BoringSSL 上游贡献代码流程                | 计划上游提交补丁时                    | 后读（专项）                  |
+| `docs/boringssl/breaking-changes.md`                    | P1               | 潜在破坏性变更的风险评估方法                 | 升级 BoringSSL 版本前                 | 后读                          |
+| `docs/boringssl/sandboxing.md`                          | P2               | 沙箱环境下使用 BoringSSL 的依赖与风险        | 受限环境运行失败排查                  | 后读（专项）                  |
 | `docs/plans/plan-ai.md`                                 | P1               | 知识体系与 AI 外审计流程规划               | 需要定义治理流程、审计节奏            | 后读（在 `plan-quic.md` 之后）  |
 | `docs/quic-interop-runner/how-to-run.md`                | P0               | Interop Runner 运行机制、环境要求与日志结构 | 运行互操作测试、定位运行环境问题      | 先读                          |
 | `docs/quic-interop-runner/implement-requirements.md`    | P0               | 容器退出码契约（0/1/127）                    | 排查测试结果判定、支持性问题          | 先读（与 `how-to-run.md` 同级） |

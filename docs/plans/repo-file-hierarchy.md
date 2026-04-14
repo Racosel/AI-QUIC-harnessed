@@ -11,9 +11,9 @@
 在本仓库中，agent 执行新设计时遵循以下边界：
 
 - 以 `docs/` 为第一约束来源，先读阶段计划、runner 契约、RFC 笔记，再开始设计或实现。
-- 以 `xquic/` 为参考实现和结构对照物，用它帮助拆模块、找入口、对齐最小运行路径，但不把新设计直接写进 `xquic/`。
+- 若当前工作树重新引入 `xquic/` 或其他参考实现快照，可用它帮助拆模块、找入口、对齐最小运行路径；但不把新设计直接写进参考实现目录。
 - 以 `ai-quic/` 为新的设计与实现落点；新的源码、测试、demo、interop 包装都应放在该目录下。
-- 若 `docs/` 与 `xquic/` 行为不一致，优先服从 `docs/` 与用户最新要求；若 `docs/` 缺口导致无法安全推进，应先补文档或记录缺口。
+- 若 `docs/` 与参考实现行为不一致，优先服从 `docs/` 与用户最新要求；若 `docs/` 缺口导致无法安全推进，应先补文档或记录缺口。
 
 ## 当前仓库现状
 
@@ -23,33 +23,32 @@
 |:--|:--|:--|
 | `docs/` | 规划与参考文档 | 阶段计划、RFC 笔记、interop 使用说明都在这里。 |
 | `quic-interop-runner/` | 外部互操作测试运行器 | 负责 testcase 调度、容器编排、日志落盘与结果判定。 |
-| `xquic/` | 参考实现与结构对照物 | 当前仓库里最完整的 QUIC/HTTP3 代码树，可用于借鉴模块边界。 |
+| `ai-quic/` | 我方实现主目录 | 当前保留项目顶层构建入口与 `boringssl/` 子树，步骤01源码骨架尚未重新落地。 |
 | `skills/` | 仓库本地 skill | 约束工作流、日志、治理和代码健康检查。 |
-| `log` / `debug` / `break` | 外部记忆文件 | 分别记录时间线、缺陷状态与断点。 |
 
 需要明确的一点：
 
-- 当前工作树中已创建 `ai-quic/` 目录骨架（`include/src/demo/interop/tests`）。
-- 目前 `ai-quic/` 仍以框架和占位文件为主，尚未进入协议逻辑实现。
+- 当前工作树中未保留 `xquic/` 参考目录。
+- 当前 `ai-quic/` 仅保留项目顶层文件与 `boringssl/` 子树，`include/src/demo/interop/tests` 这类步骤01骨架目录当前未在工作树中。
 - 后续实现应继续沿用本文的模块职责划分，逐步替换占位文件为真实实现。
 
-## 参考 `xquic` 的模块划分
+## 参考实现的模块划分
 
-`xquic/` 当前可直接借鉴的目录层级如下：
+若后续重新引入参考实现快照，可优先借鉴如下层级职责，而不是依赖某个当前并不存在的本地路径：
 
-| `xquic` 路径 | 模块职责 | 对 AI-QUIC 的启发 |
+| 参考层级 | 模块职责 | 对 AI-QUIC 的启发 |
 |:--|:--|:--|
-| `xquic/include/xquic/` | 对外公开头文件与类型定义 | 我方公共 API、错误码、配置头应独立放在 `include/`。 |
-| `xquic/src/common/` | 日志、时间、随机数、字符串、容器等公共基础设施 | 公共工具层与协议层分开，避免把基础设施塞进 transport。 |
-| `xquic/src/transport/` | 连接、包、帧、流、发送控制、定时器、传输参数等 QUIC 传输核心 | 步骤01到步骤11的大部分核心逻辑都应集中在这里。 |
-| `xquic/src/tls/` | QUIC 与 TLS 的接口、HKDF、密钥安装、SSL 适配层 | TLS/加解密逻辑与 transport 解耦，便于调试与替换后端。 |
-| `xquic/src/congestion_control/` | Cubic、BBR、Reno、Copa 等拥塞控制实现 | 拥塞控制应独立于连接/收发主逻辑。 |
-| `xquic/src/http3/` | HTTP/3 连接、请求、流、QPACK | 应与纯 QUIC transport 分层，避免步骤01过早混入 H3。 |
-| `xquic/demo/` | demo client/server 与最小 HQ 请求路径 | 最小可运行样例与库核心代码分开。 |
-| `xquic/interop/` | interop 包装脚本与镜像入口 | 互操作入口应单独组织，避免污染核心协议目录。 |
-| `xquic/tests/unittest/` | 单元测试与工具型测试 | 窄测试应与 demo/interop 分离。 |
-| `xquic/mini/` | 更轻量的最小样例 | 如需超小闭环 demo，可独立于主 demo。 |
-| `xquic/moq/` | MOQ 扩展能力 | 扩展协议或实验特性不应混进步骤01主线目录。 |
+| `include/` | 对外公开头文件与类型定义 | 我方公共 API、错误码、配置头应独立放在 `include/`。 |
+| `src/common/` | 日志、时间、随机数、字符串、容器等公共基础设施 | 公共工具层与协议层分开，避免把基础设施塞进 transport。 |
+| `src/transport/` | 连接、包、帧、流、发送控制、定时器、传输参数等 QUIC 传输核心 | 步骤01到步骤11的大部分核心逻辑都应集中在这里。 |
+| `src/tls/` | QUIC 与 TLS 的接口、HKDF、密钥安装、SSL 适配层 | TLS/加解密逻辑与 transport 解耦，便于调试与替换后端。 |
+| `src/congestion_control/` | Cubic、BBR、Reno、Copa 等拥塞控制实现 | 拥塞控制应独立于连接/收发主逻辑。 |
+| `src/http3/` | HTTP/3 连接、请求、流、QPACK | 应与纯 QUIC transport 分层，避免步骤01过早混入 H3。 |
+| `demo/` | demo client/server 与最小 HQ 请求路径 | 最小可运行样例与库核心代码分开。 |
+| `interop/` | interop 包装脚本与镜像入口 | 互操作入口应单独组织，避免污染核心协议目录。 |
+| `tests/unittest/` | 单元测试与工具型测试 | 窄测试应与 demo/interop 分离。 |
+| `mini/` | 更轻量的最小样例 | 如需超小闭环 demo，可独立于主 demo。 |
+| 扩展目录（如 `moq/`） | MOQ 等扩展能力 | 扩展协议或实验特性不应混进步骤01主线目录。 |
 
 ## 建议中的 `ai-quic/` 目录骨架
 
@@ -98,12 +97,12 @@ ai-quic/
 
 | 建议目录 | 步骤01用途 | 参考 `xquic` |
 |:--|:--|:--|
-| `ai-quic/src/transport/` | Initial/Handshake 包收发、帧处理、状态推进、ACK/PTO | `xquic/src/transport/` |
-| `ai-quic/src/tls/` | `CRYPTO`、TLS 驱动、密钥安装、密钥丢弃 | `xquic/src/tls/` |
-| `ai-quic/src/common/` | 日志、时间、缓冲区与基础工具 | `xquic/src/common/` |
-| `ai-quic/demo/` | 最小下载闭环与本地 smoke 入口 | `xquic/demo/` |
-| `ai-quic/interop/` | `handshake` testcase 的镜像入口与运行脚本 | `xquic/interop/` |
-| `ai-quic/tests/unittest/` | 包解析、TLS 过渡、状态机窄测试 | `xquic/tests/unittest/` |
+| `ai-quic/src/transport/` | Initial/Handshake 包收发、帧处理、状态推进、ACK/PTO | 参考实现的 `transport` 层 |
+| `ai-quic/src/tls/` | `CRYPTO`、TLS 驱动、密钥安装、密钥丢弃 | 参考实现的 `tls` 层 |
+| `ai-quic/src/common/` | 日志、时间、缓冲区与基础工具 | 参考实现的 `common` 层 |
+| `ai-quic/demo/` | 最小下载闭环与本地 smoke 入口 | 参考实现的 `demo` 层 |
+| `ai-quic/interop/` | `handshake` testcase 的镜像入口与运行脚本 | 参考实现的 `interop` 层 |
+| `ai-quic/tests/unittest/` | 包解析、TLS 过渡、状态机窄测试 | 参考实现的 `tests/unittest` 层 |
 
 步骤01暂不应把以下目录当主线：
 

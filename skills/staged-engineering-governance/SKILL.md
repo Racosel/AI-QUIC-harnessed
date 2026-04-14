@@ -139,6 +139,21 @@ If the repo does not use these patterns, do not create noise by inventing all of
 - 如果只完成了阶段中的一部分，就更新对应子项或备注，不要把整个阶段一起标成完成。
 - 如果 `docs/plans/process.md` 还是空白文件，先按现有阶段规划初始化，再逐步补充状态；不要从零发明与仓库现有规划脱节的新大纲。
 
+#### AI-QUIC Step 计划文件模板：默认沿用 `step01`
+
+在 AI-QUIC 仓库中，如果需要为新的 `stepXX` 建立 `docs/plans/` 下的步骤计划文件，默认沿用 `step01` 已经形成的双文件模板，尽量保持格式、职责与命名风格一致。
+
+- 参考对象默认是：
+  - `docs/plans/step01-handshake-doc-index.md`
+  - `docs/plans/step01-handshake-logic-design.md`
+- 每个新的 step 默认只新建两类文件：
+  - 一个 `*-doc-index.md`，负责记录该 step 的文档入口、相关文件索引、阅读顺序与引用关系。
+  - 一个 `*-logic-design.md`，负责记录该 step 的目标、范围、约束、切片、验收口径、验证要求与实现逻辑设计。
+- 新 step 的章节组织、标题粒度、表达风格应尽量模仿 step01，而不是为每个 step 重新发明一套文档结构。
+- 除非用户明确要求，不要再为同一个 step 额外新建其他设计类文件，例如额外的架构设计、接口设计、时序设计、测试设计、补充说明、实现草案等平级文档。
+- 如果某些内容确实需要补充，优先写回该 step 的 `*-logic-design.md`，或补到现有仓库级文档中；不要默认再拆出新的 step 级设计文件。
+- 如果历史上已经存在不符合此模板的 step 文档，默认先保持兼容，不因为这条规则自动重构旧文件；只有在用户明确要求收敛时才整理。
+
 ### 3. Plan By Stage Or Capability
 
 For large tasks:

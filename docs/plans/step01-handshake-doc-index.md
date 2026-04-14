@@ -1,10 +1,16 @@
 # 步骤01 文档目录：握手最小闭环
 
-更新于 `2026-04-09 09:59:46 +0800`
+更新于 `2026-04-09 14:29:18 +0800`
 
 ## 目标
 
 本目录用于步骤01 `handshake` 的最小阅读集，目标是让后续实现与排障始终围绕“单连接完成握手并成功下载小文件”这个最小闭环推进，而不是过早混入 Retry、0-RTT、H3 或迁移问题。
+
+## 当前工作树状态
+
+- 当前工作树未保留 `xquic/` 参考实现目录。
+- 当前工作树未保留 `ai-quic/demo/`、`ai-quic/interop/` 与 `ai-quic/src/` 的步骤01落地文件。
+- 因此，本文件中涉及这些路径的内容应视为“实现目标与阅读计划”，不应解读为“文件已存在”或“切片已完成”。
 
 ## 建议阅读顺序
 
@@ -12,17 +18,19 @@
    - 明确步骤01在全局计划中的位置、验收标准和前后依赖。
 2. `docs/plans/repo-file-hierarchy.md`
    - 先确认当前仓库现状、建议中的 `ai-quic/` 目录，以及参考 `xquic` 的模块切分方式。
-3. `docs/quic-interop-runner/quic-test-cases.md`
+3. `docs/plans/step01-handshake-logic-design.md`
+   - 在编码前先审查“路径1”的模块落点、状态机、收发时序与待拍板决策，避免边写边改架构。
+4. `docs/quic-interop-runner/quic-test-cases.md`
    - 明确 `TESTCASE="handshake"` 的测试语义：单连接、小文件下载、服务端不发送 Retry。
-4. `docs/quic-interop-runner/how-to-run.md`
+5. `docs/quic-interop-runner/how-to-run.md`
    - 明确 `/www`、`/downloads`、`REQUESTS`、`TESTCASE`、`/certs`、日志目录、`SSLKEYLOGFILE`、`QLOGDIR` 的运行契约。
-5. `docs/quic-interop-runner/implement-requirements.md`
+6. `docs/quic-interop-runner/implement-requirements.md`
    - 明确退出码 `0 / 1 / 127` 的判定边界。
-6. `docs/ietf/notes/9000.md`
+7. `docs/ietf/notes/9000.md`
    - 核对 Initial 最小 1200 字节、ACK 行为、包号空间、`CRYPTO` / `HANDSHAKE_DONE` / 反放大规则。
-7. `docs/ietf/notes/9001.md`
+8. `docs/ietf/notes/9001.md`
    - 核对 TLS 1.3 与 QUIC `CRYPTO` 帧对接、密钥安装、Initial/Handshake 密钥丢弃、`HANDSHAKE_DONE`。
-8. `docs/ietf/notes/9002.md`
+9. `docs/ietf/notes/9002.md`
    - 核对握手阶段的 RTT/PTO、Initial/Handshake 空间恢复、反放大与地址验证配合。
 
 ## 主题目录
@@ -31,6 +39,7 @@
 |:--|:--|:--|
 | 阶段目标 | `docs/plans/plan-quic.md` | 步骤01只做最小握手闭环，不提前吞并后续步骤。 |
 | testcase 语义 | `docs/quic-interop-runner/quic-test-cases.md` | `handshake` 需要单连接、小文件下载、无 Retry。 |
+| 路径1逻辑设计 | `docs/plans/step01-handshake-logic-design.md` | 编码前先审查模块落点、状态机、密钥时序和阻断决策。 |
 | runner 契约 | `docs/quic-interop-runner/how-to-run.md` | 服务端读 `/www`，客户端写 `/downloads`，请求来自 `REQUESTS`。 |
 | 结果判定 | `docs/quic-interop-runner/implement-requirements.md` | 成功必须返回 `0`；错误 `1`；不支持 `127`。 |
 | 仓库层级与代码落点 | `docs/plans/repo-file-hierarchy.md` | 先区分当前仓库现状与建议中的 `ai-quic/` 目录，再决定代码应落在哪一层。 |
@@ -38,22 +47,20 @@
 | TLS 集成 | `docs/ietf/notes/9001.md` | TLS 握手必须通过 QUIC `CRYPTO` 帧传输，不走 TLS record。 |
 | 恢复与 PTO | `docs/ietf/notes/9002.md` | 握手前应用数据空间不开 PTO；Initial/Handshake 的 `max_ack_delay=0`。 |
 
-## 代码入口与模块阅读顺序
+## 当前可执行的阅读重点
 
-在当前仓库里，步骤01的代码阅读应以 `xquic/` 为参考实现入口，以 `docs/plans/repo-file-hierarchy.md` 作为未来 `ai-quic/` 落点规划。
+在当前仓库里，步骤01应先以文档与 runner 契约为主，而不是假定本地已经存在可阅读的参考实现目录。
 
-1. `xquic/interop/run_endpoint.sh`
-   - 先确认 `handshake` testcase 在 interop 包装层如何映射到 client/server 启动参数。
-2. `xquic/demo/demo_client.c`、`xquic/demo/demo_server.c`、`xquic/demo/xqc_hq_*`
-   - 先看最小 HTTP/0.9 下载路径如何挂到连接与流回调上。
-3. `xquic/src/transport/`
-   - 步骤01的核心目录，优先阅读 `xqc_conn.*`、`xqc_packet*`、`xqc_frame*`、`xqc_stream.*`、`xqc_send_ctl.*`、`xqc_timer.*`、`xqc_transport_params.*`。
-4. `xquic/src/tls/`
-   - 对照 `xqc_tls*`、`xqc_crypto*`、`xqc_hkdf*`，确认 QUIC `CRYPTO` 与 TLS 握手、密钥安装和密钥丢弃的衔接点。
-5. `xquic/src/common/`
-   - 需要补高信号日志、时间与随机数等基础设施时再回看 `xqc_log*`、`xqc_time*`、`xqc_random*`。
-6. 暂不优先阅读的目录
-   - `xquic/src/http3/`、`xquic/src/congestion_control/`、`xquic/moq/` 不是步骤01主线；只有在确认握手闭环已稳定后再扩展。
+1. `docs/plans/repo-file-hierarchy.md`
+   - 先确认未来 `ai-quic/` 目录应该如何重新落位，避免恢复代码时把模块放错层。
+2. `docs/quic-interop-runner/quic-test-cases.md`
+   - 先锁定 `handshake` testcase 的真实验收语义。
+3. `docs/quic-interop-runner/how-to-run.md`
+   - 先锁定 `/www`、`/downloads`、`REQUESTS`、`TESTCASE`、`SSLKEYLOGFILE`、`QLOGDIR` 等 runner 契约。
+4. `docs/ietf/notes/9000.md`、`docs/ietf/notes/9001.md`、`docs/ietf/notes/9002.md`
+   - 先锁定步骤01最小握手必须满足的传输、TLS 与恢复语义。
+5. 若后续重新引入参考实现快照
+   - 再补读相应的 demo、interop、transport、tls 目录，不把这一步写死到当前仓库路径上。
 
 ## 步骤01最小实现清单
 
@@ -272,7 +279,7 @@ find logs_step01_handshake_smoke/xquic_xquic/handshake -type f \( -name '*.qlog'
 2. 再看 `server/` 与 `client/` 日志，定位卡在 Initial、Handshake、1-RTT 还是下载阶段。
 3. 如果日志不足，再看 `sim/` 抓包确认真实发包与回包。
 4. 如果仍不够，再看 qlog / keylog。
-5. 每次定位后，把结论同步回 `docs/plans/process.md`、`log`、`debug`、`break`。
+5. 每次定位后，把结论同步回当前仍在维护的状态文档或交接记录；不要假定 `process.md`、`log`、`debug`、`break` 一定存在。
 
 ## 验证证据目录
 
@@ -288,5 +295,4 @@ find logs_step01_handshake_smoke/xquic_xquic/handshake -type f \( -name '*.qlog'
 - 需要决定代码应该落在哪时，先读 `docs/plans/repo-file-hierarchy.md`，不要把“当前参考实现目录”和“未来我方目录”混在一起。
 - 运行步骤01时，优先复制本文件中的命令模板，并显式指定新的 `-l` 日志目录。
 - 读测试结果时，固定按 `output.txt -> server/client -> sim -> qlog` 的顺序排查。
-- 更新步骤01状态时，优先同步 `docs/plans/process.md`。
 - 新增、删除或重命名本文件后，必须同步更新 `docs/menu.md`。
