@@ -1,298 +1,201 @@
-# 步骤01 文档目录：握手最小闭环
+# 步骤00+01 文档目录：Version Negotiation + Handshake
 
-更新于 `2026-04-09 14:29:18 +0800`
+更新于 `2026-04-14`
 
 ## 目标
 
-本目录用于步骤01 `handshake` 的最小阅读集，目标是让后续实现与排障始终围绕“单连接完成握手并成功下载小文件”这个最小闭环推进，而不是过早混入 Retry、0-RTT、H3 或迁移问题。
+本文档是步骤00与步骤01的联合入口，用于指导后续实现与排障围绕以下最小闭环推进：
 
-## 当前工作树状态
+- 步骤00：未知版本首包触发无状态 Version Negotiation（VN）回复。
+- 步骤01：单连接完成最小 QUIC 握手，并在 1-RTT 后成功下载小文件。
 
-- 当前工作树未保留 `xquic/` 参考实现目录。
-- 当前工作树未保留 `ai-quic/demo/`、`ai-quic/interop/` 与 `ai-quic/src/` 的步骤01落地文件。
-- 因此，本文件中涉及这些路径的内容应视为“实现目标与阅读计划”，不应解读为“文件已存在”或“切片已完成”。
+本地完成标准按更严格口径执行：
+
+- `step1` 完成，意味着 **步骤00和步骤01同时完成**。
+- `versionnegotiation` 与 `handshake` 共用同一套 `dispatcher / invariant parsing / 连接入口` 骨架。
+- `handshake` testcase 仍要求“无 Retry、单连接、小文件下载”；但本地阶段完成判定额外要求同时具备步骤00的无状态 VN 路径。
+
+说明：
+
+- `docs/plans/plan-quic.md` 仍保留“步骤00禁用占位”的主线表述。
+- 本文档只定义步骤00+01的更严格本地完成标准，不改写主计划的阶段排序。
 
 ## 建议阅读顺序
 
 1. `docs/plans/plan-quic.md`
-   - 明确步骤01在全局计划中的位置、验收标准和前后依赖。
+   - 先对齐步骤00与步骤01在主线中的位置、边界和验收重点。
 2. `docs/plans/repo-file-hierarchy.md`
-   - 先确认当前仓库现状、建议中的 `ai-quic/` 目录，以及参考 `xquic` 的模块切分方式。
-3. `docs/plans/step01-handshake-logic-design.md`
-   - 在编码前先审查“路径1”的模块落点、状态机、收发时序与待拍板决策，避免边写边改架构。
-4. `docs/quic-interop-runner/quic-test-cases.md`
-   - 明确 `TESTCASE="handshake"` 的测试语义：单连接、小文件下载、服务端不发送 Retry。
-5. `docs/quic-interop-runner/how-to-run.md`
-   - 明确 `/www`、`/downloads`、`REQUESTS`、`TESTCASE`、`/certs`、日志目录、`SSLKEYLOGFILE`、`QLOGDIR` 的运行契约。
-6. `docs/quic-interop-runner/implement-requirements.md`
-   - 明确退出码 `0 / 1 / 127` 的判定边界。
-7. `docs/ietf/notes/9000.md`
-   - 核对 Initial 最小 1200 字节、ACK 行为、包号空间、`CRYPTO` / `HANDSHAKE_DONE` / 反放大规则。
-8. `docs/ietf/notes/9001.md`
-   - 核对 TLS 1.3 与 QUIC `CRYPTO` 帧对接、密钥安装、Initial/Handshake 密钥丢弃、`HANDSHAKE_DONE`。
-9. `docs/ietf/notes/9002.md`
-   - 核对握手阶段的 RTT/PTO、Initial/Handshake 空间恢复、反放大与地址验证配合。
+   - 先明确代码、demo、interop 包装与测试应落在哪些目录。
+3. `docs/quic-interop-runner/quic-test-cases.md`
+   - 先锁定 `versionnegotiation` 与 `handshake` 的 testcase 语义。
+4. `docs/quic-interop-runner/how-to-run.md`
+   - 先锁定 `/www`、`/downloads`、`/certs`、`REQUESTS`、`SSLKEYLOGFILE`、`QLOGDIR` 与日志目录契约。
+5. `docs/quic-interop-runner/implement-requirements.md`
+   - 先锁定退出码 `0 / 1 / 127` 的边界。
+6. `docs/ietf/notes/9000.md`
+   - 核对 VN、Initial 最小 1200 字节、CID 认证、ACK 规则、`HANDSHAKE_DONE`、反放大限制。
+7. `docs/ietf/notes/9001.md`
+   - 核对 `CRYPTO`、TLS 集成、密钥安装/丢弃、握手完成时序。
+8. `docs/ietf/notes/9002.md`
+   - 核对握手阶段 ACK、PTO、丢弃密钥后的状态清理、地址验证配合。
+9. `docs/plans/step01-handshake-logic-design.md`
+   - 在编码前审查步骤00+01的行为级实现规格。
 
 ## 主题目录
 
 | 主题 | 首选文档 | 本步要点 |
 |:--|:--|:--|
-| 阶段目标 | `docs/plans/plan-quic.md` | 步骤01只做最小握手闭环，不提前吞并后续步骤。 |
-| testcase 语义 | `docs/quic-interop-runner/quic-test-cases.md` | `handshake` 需要单连接、小文件下载、无 Retry。 |
-| 路径1逻辑设计 | `docs/plans/step01-handshake-logic-design.md` | 编码前先审查模块落点、状态机、密钥时序和阻断决策。 |
-| runner 契约 | `docs/quic-interop-runner/how-to-run.md` | 服务端读 `/www`，客户端写 `/downloads`，请求来自 `REQUESTS`。 |
-| 结果判定 | `docs/quic-interop-runner/implement-requirements.md` | 成功必须返回 `0`；错误 `1`；不支持 `127`。 |
-| 仓库层级与代码落点 | `docs/plans/repo-file-hierarchy.md` | 先区分当前仓库现状与建议中的 `ai-quic/` 目录，再决定代码应落在哪一层。 |
-| Initial / ACK / 帧限制 | `docs/ietf/notes/9000.md` | Initial 至少 1200 字节；Initial/Handshake 立即 ACK；`CRYPTO` 可靠重传。 |
-| TLS 集成 | `docs/ietf/notes/9001.md` | TLS 握手必须通过 QUIC `CRYPTO` 帧传输，不走 TLS record。 |
-| 恢复与 PTO | `docs/ietf/notes/9002.md` | 握手前应用数据空间不开 PTO；Initial/Handshake 的 `max_ack_delay=0`。 |
+| 阶段目标 | `docs/plans/plan-quic.md` | 本地完成标准按 `step0 + step1` 联合执行。 |
+| 目录与代码落点 | `docs/plans/repo-file-hierarchy.md` | 明确新代码、demo、interop 入口和测试目录边界。 |
+| testcase 语义 | `docs/quic-interop-runner/quic-test-cases.md` | `versionnegotiation` 看无状态 VN；`handshake` 看单连接、小文件、无 Retry。 |
+| runner 契约 | `docs/quic-interop-runner/how-to-run.md` | 服务端读 `/www`，客户端写 `/downloads`，证书来自 `/certs`。 |
+| 退出码 | `docs/quic-interop-runner/implement-requirements.md` | 成功 `0`，错误 `1`，未支持 `127`。 |
+| 传输层约束 | `docs/ietf/notes/9000.md` | VN 无状态、Initial 至少 1200 字节、CID/TP 校验。 |
+| TLS 集成 | `docs/ietf/notes/9001.md` | `CRYPTO` 可靠交付、同级别重传、密钥安装与丢弃。 |
+| 恢复与 PTO | `docs/ietf/notes/9002.md` | Initial/Handshake 立即 ACK，`max_ack_delay=0`，握手前不启用 AppData PTO。 |
+| 逻辑设计 | `docs/plans/step01-handshake-logic-design.md` | 统一的步骤00+01实现规格。 |
 
-## 当前可执行的阅读重点
+## 用户主入口：根目录 Makefile
 
-在当前仓库里，步骤01应先以文档与 runner 契约为主，而不是假定本地已经存在可阅读的参考实现目录。
+步骤00+01 从这次开始统一要求：
 
-1. `docs/plans/repo-file-hierarchy.md`
-   - 先确认未来 `ai-quic/` 目录应该如何重新落位，避免恢复代码时把模块放错层。
-2. `docs/quic-interop-runner/quic-test-cases.md`
-   - 先锁定 `handshake` testcase 的真实验收语义。
-3. `docs/quic-interop-runner/how-to-run.md`
-   - 先锁定 `/www`、`/downloads`、`REQUESTS`、`TESTCASE`、`SSLKEYLOGFILE`、`QLOGDIR` 等 runner 契约。
-4. `docs/ietf/notes/9000.md`、`docs/ietf/notes/9001.md`、`docs/ietf/notes/9002.md`
-   - 先锁定步骤01最小握手必须满足的传输、TLS 与恢复语义。
-5. 若后续重新引入参考实现快照
-   - 再补读相应的 demo、interop、transport、tls 目录，不把这一步写死到当前仓库路径上。
+- 仓库根目录必须维护一个 `Makefile`。
+- 所有高频构建、运行、排障命令优先通过 `make` 暴露。
+- `Makefile` 是用户主入口；`ai-quic/interop/*.sh`、`python3 run.py ...` 等只作为底层实现细节。
 
-## 步骤01最小实现清单
+步骤00+01至少应预留以下目标：
 
-- 客户端能发送填充后的 Initial。
-- 服务端能接收 Initial，启动 TLS，回发 Initial/Handshake。
-- 客户端能处理服务端 Initial/Handshake，推进到 Handshake / 1-RTT。
-- 双端能在正确时机安装新密钥并丢弃 Initial 密钥。
+- `make build`
+- `make interop-versionnegotiation`
+- `make interop-handshake-smoke`
+- `make interop-handshake-server`
+- `make interop-handshake-client`
+- `make interop-logs CASE=<testcase>`
+
+如果这些目标尚未落地，表示步骤00+01的用户入口仍未交付完整。
+
+## 步骤00+01最小实现清单
+
+- 服务端能对未知版本首包执行无状态 VN 回复，不创建真实连接对象。
+- 客户端能发送填充后的 Initial，且首个 Initial 的 UDP 有效载荷至少 1200 字节。
+- 服务端能接收 Initial，启动 TLS，回发 Initial/Handshake，并允许最小 coalesced datagram 路径。
+- 双端按 `Initial / Handshake / AppData` 三个 packet number space 独立维护 ACK、丢包恢复与密钥生命周期。
+- `CRYPTO` 数据能按原始加密级别可靠重传，且乱序缓冲不阻塞 TLS 正常推进。
+- 双端能在正确时机安装新密钥并丢弃旧密钥。
 - 服务端握手完成后发送 `HANDSHAKE_DONE`。
-- 双端能在单连接上完成最小文件下载。
-- 失败时能从 runner 日志、端点日志、pcap、qlog 快速定位卡点。
+- 双端能在单条双向流上完成最小 HTTP/0.9 文件下载。
+- 失败时能从 runner 日志、端点日志、pcap、qlog、keylog 快速定位卡点。
 
 ## 关键约束速查
 
-- 本步不允许把 Retry 作为成功路径的一部分。
-- Initial 和 Handshake 包必须立即 ACK。
-- `CRYPTO` 数据必须可靠重传，且用原始加密级别重传。
+### 步骤00：Version Negotiation
+
+- VN 必须走 `dispatcher` 层无状态路径。
+- 不支持的版本若满足最小首包长度要求，应返回 VN；长度不足可直接丢弃。
+- VN 不得创建真实连接状态。
+- Short Header 报文不触发 VN。
+- VN 包不得包含客户端已提议的版本。
+
+### 步骤01：最小握手闭环
+
+- `handshake` testcase 成功路径中，服务端不允许发送 Retry。
+- Initial 与 Handshake 包必须立即 ACK。
+- `CRYPTO` 数据必须可靠重传，且必须使用原始加密级别重传。
 - 地址验证完成前，服务端受 3 倍反放大限制。
-- 客户端首次发送 Handshake 包后丢弃 Initial 密钥；服务端首次成功处理 Handshake 包后丢弃 Initial 密钥。
+- 客户端首次发送 Handshake 包后丢弃 Initial 密钥。
+- 服务端首次成功处理 Handshake 包后丢弃 Initial 密钥。
 - `HANDSHAKE_DONE` 只能由服务端在握手完成后发送。
+- 握手确认前不得为 AppData 空间设置 PTO。
 
-## 如何启动 Interop 测试
+## 联合验收口径
 
-### 1. 进入 runner 目录
+### 步骤00：`versionnegotiation`
 
-```bash
-cd /home/racosel/Desktop/quic/quic-interop-runner
-```
+本地完成时至少要满足：
 
-### 2. 首次运行前安装依赖
+- 客户端使用不支持的版本发起连接。
+- 服务端返回 Version Negotiation 包。
+- VN 包满足基本线缆约束：
+  - `Version = 0x00000000`
+  - 回显并交换收到的 DCID / SCID
+  - 版本列表不包含客户端当前已提议版本
+- 客户端在收到 VN 后中止当前连接尝试。
+- 无真实连接对象被创建或推进到握手状态。
 
-```bash
-pip3 install -r requirements.txt
-```
+与 runner 语义对齐时，`versionnegotiation` 的成功关键证据是：
 
-说明：
-
-- `run.py` 在当前目录下执行。
-- 需要本机已安装 Docker、docker compose、Wireshark 4.5.0+。
-- 如果显式指定 `-l <日志目录>`，该目录必须不存在；否则 runner 会直接退出。
-
-### 3. 推荐的步骤01运行命令
-
-#### 命令 A：同实现自检烟雾测试
-
-先确认 runner、镜像、日志路径和最小 handshake 流程本身能跑起来：
-
-```bash
-python3 run.py -d -s xquic -c xquic -t handshake -l logs_step01_handshake_smoke
-```
-
-适用场景：
-
-- 先验证 runner 基础链路是否可用。
-- 先确认 `handshake` testcase 的日志结构和结果目录是否正常生成。
-
-注意：
-
-- 这只是最小烟雾测试，不足以证明真实互操作性。
-- 同实现双端更容易掩盖兼容性问题，不能当作步骤01最终完成证据。
-
-#### 命令 B：更有价值的跨实现测试
-
-优先用跨实现组合验证，至少跑一组“本实现做 server”或“本实现做 client”的组合：
-
-```bash
-python3 run.py -d -s xquic -c quic-go -t handshake -l logs_step01_handshake_xquic_server
-python3 run.py -d -s quic-go -c xquic -t handshake -l logs_step01_handshake_xquic_client
-```
+- 客户端 trace 中存在与其首个 Initial 的 DCID 匹配的 VN 包 `SCID`。
 
 说明：
 
-- `-s` 是 server 实现名，`-c` 是 client 实现名。
-- 当前 runner 注册文件 `implementations_quic.json` 中可直接使用的名字包括 `xquic`、`quic-go`、`ngtcp2`、`aioquic`、`msquic` 等。
-- 若目标是验证“我方实现作为服务端”能力，优先看 `-s 我方 -c 对端`。
-- 若目标是验证“我方实现作为客户端”能力，优先看 `-s 对端 -c 我方`。
+- `quic-interop-runner` 当前主线仍将该 case 标记为 disabled。
+- 因此，步骤00的完成可通过本地自检、pcap 验证、单测或等价 runner 语义验证来判定，但能力本身必须实现。
 
-#### 命令 C：替换为本地镜像
+### 步骤01：`handshake`
 
-如果你已经构建了本地镜像，不想直接使用 `implementations_quic.json` 里的远端镜像，可以用 `-r` 替换：
+与 `quic-interop-runner/testcases_quic.py` 对齐后，成功至少要满足：
 
-```bash
-python3 run.py -d -s xquic -c quic-go -t handshake -l logs_step01_handshake_local -r xquic=<你的本地镜像tag>
-```
-
-例子：
-
-```bash
-python3 run.py -d -s xquic -c quic-go -t handshake -l logs_step01_handshake_local -r xquic=my-xquic-interop:dev
-```
-
-适用场景：
-
-- 你在本地修改了实现，已经构建了新的 interop 镜像。
-- 想保留 runner 中 `xquic` 这个实现名，但临时换成自己的镜像测试。
-
-### 4. 推荐参数说明
-
-- `-d`：打印更多调试日志，步骤01建议始终开启。
-- `-t handshake`：只跑步骤01对应 testcase，避免被其他 testcase 噪音干扰。
-- `-l <dir>`：显式指定日志目录，方便反复比较不同轮结果。
-- `-s` / `-c`：锁定 server/client 组合，避免一次性跑完整矩阵。
-
-## 如何读取测试结果
-
-### 1. 先看 runner 总输出
-
-无论成功还是失败，先看终端输出；如果指定了 `-l logs_step01_handshake_smoke`，重点目录是：
-
-```text
-logs_step01_handshake_smoke/<server>_<client>/handshake/
-```
-
-例如：
-
-```text
-logs_step01_handshake_smoke/xquic_xquic/handshake/
-logs_step01_handshake_xquic_server/xquic_quic-go/handshake/
-logs_step01_handshake_xquic_client/quic-go_xquic/handshake/
-```
-
-先列一下实际生成了哪些文件：
-
-```bash
-find logs_step01_handshake_smoke/xquic_xquic/handshake -maxdepth 2 -type f | sort
-```
-
-### 2. 第一优先级：`output.txt`
-
-`output.txt` 是 runner 的总控制台输出，也是第一排查入口：
-
-```bash
-sed -n '1,220p' logs_step01_handshake_smoke/xquic_xquic/handshake/output.txt
-```
-
-如果只想先看失败关键词：
-
-```bash
-rg -n "exited with code|Didn't expect a Retry|Expected exactly 1 handshake|Wrong version|Missing files|doesn't match" \
-  logs_step01_handshake_smoke/xquic_xquic/handshake/output.txt
-```
-
-为什么先看这里：
-
-- runner 会先记录容器退出码。
-- `handshake` 的 testcase 检查失败原因会直接写进这里。
-- 这里能最快区分“镜像/容器没起来”和“协议握手失败但 runner 正常执行”。
-
-### 3. 第二优先级：端点日志
-
-先列出 client/server 各自产生了哪些日志文件：
-
-```bash
-find logs_step01_handshake_smoke/xquic_xquic/handshake/client -type f | sort
-find logs_step01_handshake_smoke/xquic_xquic/handshake/server -type f | sort
-```
-
-对 `xquic` 来说，通常重点先看：
-
-```bash
-sed -n '1,220p' logs_step01_handshake_smoke/xquic_xquic/handshake/client/client.log
-sed -n '1,220p' logs_step01_handshake_smoke/xquic_xquic/handshake/server/server.log
-```
-
-读取顺序建议：
-
-1. 先看服务端有没有成功收到 Initial，是否推进到 Handshake。
-2. 再看客户端有没有安装 Handshake/1-RTT 密钥，是否收到 `HANDSHAKE_DONE`。
-3. 最后看下载路径是否已经进入最小文件请求/保存。
-
-### 4. 第三优先级：模拟器抓包 `sim/`
-
-如果 `output.txt` 和端点日志不足以判断问题在“未发包 / 未回包 / 回包未解密 / 状态未推进”，就看 `sim/`：
-
-```bash
-find logs_step01_handshake_smoke/xquic_xquic/handshake/sim -maxdepth 1 -type f | sort
-```
-
-这里通常重点是 pcap 文件，例如 `trace_node_left.pcap`、`trace_node_right.pcap`。步骤01下看抓包主要是回答这些问题：
-
-- 客户端 Initial 是否真的发出去了。
-- 服务端是否回了 Initial / Handshake。
-- 是否出现了不该出现的 Retry。
-- 握手是否重复发生了多次。
-
-### 5. 第四优先级：qlog / keylog
-
-如果实现导出了 qlog 或 TLS keylog，再继续看这些文件：
-
-```bash
-find logs_step01_handshake_smoke/xquic_xquic/handshake -type f \( -name '*.qlog' -o -name '*.sqlog' -o -name '*keylog*' \) | sort
-```
-
-适用场景：
-
-- 端点日志不足以判断具体卡在哪个加密级别。
-- 需要确认 `CRYPTO` 数据、密钥安装、`HANDSHAKE_DONE`、ACK/PTO 时序。
-
-## `handshake` testcase 实际如何判成功
-
-根据 `quic-interop-runner/testcases_quic.py` 与 `testcase.py`，`handshake` 不是“只要握手包交换过就算成功”，而是至少要同时满足：
-
-- 下载文件成功，且下载内容与 server 端生成的文件完全一致。
-- 版本检查通过，当前应是单一 QUIC v1。
+- 版本检查通过，且当前仅使用 QUIC v1。
+- 下载文件成功，且客户端落盘文件与服务端源文件内容完全一致。
 - 服务端没有发送 Retry。
-- 抓包中只能出现恰好 1 次握手。
+- 抓包中恰好只有 1 次握手。
 
 这意味着：
 
 - “客户端和服务端都打印了 handshake finished” 还不够。
-- “只建连成功但文件没落到 `/downloads`” 也不算通过。
+- “握手成功但文件没写到 `/downloads`” 不算通过。
 - “握手成功但出现 Retry” 在步骤01里仍算失败。
+
+### 联合完成判定
+
+只有同时满足以下两项，才算步骤00+01完成：
+
+- 步骤00的无状态 VN 路径可验证通过。
+- 步骤01的最小握手与单流下载路径可验证通过。
 
 ## 建议的排障顺序
 
-1. 先看 `output.txt`，确认是容器启动/退出问题，还是 testcase 语义检查失败。
-2. 再看 `server/` 与 `client/` 日志，定位卡在 Initial、Handshake、1-RTT 还是下载阶段。
-3. 如果日志不足，再看 `sim/` 抓包确认真实发包与回包。
-4. 如果仍不够，再看 qlog / keylog。
-5. 每次定位后，把结论同步回当前仍在维护的状态文档或交接记录；不要假定 `process.md`、`log`、`debug`、`break` 一定存在。
+固定按以下顺序排查：
 
-## 验证证据目录
+1. `output.txt`
+   - 先区分是容器启动/退出问题，还是 testcase 语义检查失败。
+2. `server/` 与 `client/` 日志
+   - 再定位卡在 Initial、Handshake、1-RTT 还是下载阶段。
+3. `sim/` 抓包
+   - 如果日志不足，再判断真实发包、回包、VN、握手次数与是否出现 Retry。
+4. `qlog` / `keylog`
+   - 如果仍不足，再看加密级别、密钥安装、旧 key 丢弃和握手完成时序。
 
+## 建议的验证证据目录
+
+- `logs/<server>_<client>/versionnegotiation/`
 - `logs/<server>_<client>/handshake/output.txt`
 - `logs/<server>_<client>/handshake/server/`
 - `logs/<server>_<client>/handshake/client/`
 - `logs/<server>_<client>/handshake/sim/`
 - `QLOGDIR` 输出目录
 
-## 使用方式
+## 推荐操作方式
 
-- 规划步骤01时，先读本文件，再按“建议阅读顺序”补齐原始文档。
-- 需要决定代码应该落在哪时，先读 `docs/plans/repo-file-hierarchy.md`，不要把“当前参考实现目录”和“未来我方目录”混在一起。
-- 运行步骤01时，优先复制本文件中的命令模板，并显式指定新的 `-l` 日志目录。
-- 读测试结果时，固定按 `output.txt -> server/client -> sim -> qlog` 的顺序排查。
-- 新增、删除或重命名本文件后，必须同步更新 `docs/menu.md`。
+- 规划步骤00+01时，先读本文件，再按“建议阅读顺序”补齐原始文档。
+- 需要决定代码落点时，先读 `docs/plans/repo-file-hierarchy.md`。
+- 运行步骤00+01时，优先从仓库根目录执行 `make` 目标。
+- 原始长命令只放在附录作为 `Makefile` 的底层实现说明，不作为主入口。
+- 若后续重命名本文件或 `docs/plans/step01-handshake-logic-design.md`，再同步更新 `docs/menu.md`。
+
+## 附录：Make 目标与底层命令的映射约束
+
+以下长命令不应作为用户主入口，而应封装进根目录 `Makefile`：
+
+- `make interop-versionnegotiation`
+  - 底层实现可调用 `quic-interop-runner` 的 `run.py` 或本地自检脚本，对未知版本首包与 VN 报文进行验证。
+- `make interop-handshake-smoke`
+  - 底层实现可调用 `python3 run.py -t handshake ...` 的同实现烟雾测试。
+- `make interop-handshake-server`
+  - 底层实现可调用“我方 server + 对端 client”的跨实现组合。
+- `make interop-handshake-client`
+  - 底层实现可调用“对端 server + 我方 client”的跨实现组合。
+- `make interop-logs CASE=handshake`
+  - 底层实现可统一打开对应日志目录，并按 `output.txt -> server/client -> sim -> qlog` 顺序展示排障入口。
+
+文档中优先写 `make` 目标；如果需要解释底层实现，再补原始命令。

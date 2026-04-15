@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/ai_quic_smoke_test.dir/tests/unittest/test_smoke.c.o -o bin/ai_quic_smoke_test  lib/libai_quic_transport.a lib/libai_quic_tls.a lib/libai_quic_common.a lib/libssl.a lib/libcrypto.a 

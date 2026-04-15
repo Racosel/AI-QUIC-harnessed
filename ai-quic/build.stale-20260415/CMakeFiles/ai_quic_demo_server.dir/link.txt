@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/ai_quic_demo_server.dir/demo/demo_cli.c.o CMakeFiles/ai_quic_demo_server.dir/demo/server_main.c.o -o bin/ai_quic_demo_server  lib/libai_quic_transport.a lib/libai_quic_tls.a lib/libai_quic_common.a lib/libssl.a lib/libcrypto.a 

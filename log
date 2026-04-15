@@ -1,0 +1,11 @@
+[2026-04-14 17:52:38 +0800] 启动阶段0~1编码前检查；已按 docs/plans/step01-handshake-doc-index.md、step01-handshake-logic-design.md、repo-file-hierarchy.md 与 quic-interop-runner 文档确认目标，并开始核对 ai-quic 现有代码骨架与构建前置条件。
+[2026-04-14 17:53:28 +0800] 完成阶段0~1开工前检查；确认 ai-quic 目录当前仅有 README 与 boringssl 子树，缺少我方 QUIC 源码、demo、interop 包装、测试目录与镜像入口。按用户要求在发现硬阻塞后停止编码，并准备输出问题清单。
+[2026-04-14 18:17:40 +0800] 已完成阶段0~1前置基础部件搭建：落地 ai-quic/include、src/common、src/tls、src/transport、demo、interop、tests/unittest 与独立 CMakeLists.txt，并统一公共/内部符号使用 ai_quic_* 前缀。
+[2026-04-14 18:17:40 +0800] 已完成本地基础验证：make build 通过，ai_quic_demo_server --help 与 ai_quic_demo_client --help 可运行，ctest 中 ai_quic_smoke_test 通过。
+[2026-04-14 18:17:40 +0800] 已完成 interop 基础契约验证：ai-quic 作为 server/client 都能被 quic-interop-runner 拉起并通过 compliance probe；真实 handshake testcase 按当前阶段设计返回 127 并被 runner 记为 UNSUPPORTED。
+[2026-04-14 18:17:40 +0800] 已修正根目录 Makefile 的 interop 日志收敛问题；现在每次 make interop-* 都会在 artifacts/interop 下生成独立目录、runner-output.txt、run-meta.txt 与 latest 符号链接，便于后续统一清理。
+[2026-04-15 16:08:31 +0800] 已定位并修复 xquic-ai-quic 链路前置阻塞：ai-quic interop client 先前缺少 QNS 路由初始化且起跑过早，导致应用日志显示已 sendto()，但 pcap 中看不到真实 QUIC UDP。现已在 ai-quic interop 镜像加入 setup.sh 路由/校验和配置，并在 run_endpoint.sh 为 client 增加有界启动延迟。
+[2026-04-15 16:10:42 +0800] 已定位并修复 ai-quic client 的 SNI 缺失：此前 xquic server 在解出 ClientHello 后报 `hostname is NULL`；现已把 authority 传入 BoringSSL QUIC client 并设置 `SSL_set_tlsext_host_name(...)`，xquic 日志已变为看到 `sni:server4`。
+[2026-04-15 16:10:45 +0800] 最新 handshake 失败点已收敛到 ai-quic client 的后处理路径：xquic 已成功接收并处理我方 Initial，且已发出完整 server Initial/Handshake flight；ai-quic client 也已能接收并记录这些包，但仍未继续发送任何 ACK 或 Handshake CRYPTO，导致对端持续 PTO 重传直至 runner 60 秒超时。
+ 已根据 RFC 9000/9001 收敛并修复 handshake 阶段动作缺失：补上 Initial/Handshake ACK-only 发送、1-RTT post-handshake CRYPTO 接收、PING/NEW_TOKEN/NEW_CONNECTION_ID 与标准 STREAM/ACK_ECN 解码；xquic<-ai-quic 与 ai-quic<-xquic 两个 handshake interop 均已通过。
+[2026-04-15 16:33:41 +0800] 已根据 RFC 9000/9001 收敛并修复 handshake 阶段动作缺失：补上 Initial/Handshake ACK-only 发送、1-RTT post-handshake CRYPTO 接收、PING/NEW_TOKEN/NEW_CONNECTION_ID 与标准 STREAM/ACK_ECN 解码；xquic<-ai-quic 与 ai-quic<-xquic 两个 handshake interop 均已通过。

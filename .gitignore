@@ -1,1 +1,4 @@
 .codex
+artifacts/
+quic-interop-runner/logs_*
+ai-quic/build/

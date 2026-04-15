@@ -1,0 +1,152 @@
+# 阶段0~1 / 基础骨架完成断点（更新于 2026-04-14 18:17:40 +0800）
+
+当前状态
+- 阶段0~1前置基础部件已经完成，协议编码尚未开始。
+- 当前仓库已经具备可重复构建的 `ai-quic/` 骨架、demo 入口、interop 镜像入口、统一日志落点与一键清理入口。
+
+已完成
+- 读取步骤0~1专项计划与 runner/RFC 约束。
+- 建立根目录 `log`、`debug`、`break`。
+- 落地 `ai-quic/` 最小源码、测试、demo 与 interop 目录骨架。
+- 建立 `ai-quic/CMakeLists.txt` 并完成本地构建、help、自检与 smoke test 验证。
+- 建立 `ai-quic-interop:latest` 镜像及 `run_endpoint.sh`，验证 ai-quic 在 runner 中可作为 server/client 启动并对未实现 testcase 返回 `127`。
+- 修正根目录 `Makefile` 的日志与 latest 符号链接管理；当前 `artifacts/interop/` 已可稳定保存 `runner-output.txt` 与 `run-meta.txt`。
+- 明确写入 `ai_quic_*` 命名约束。
+
+未完成
+- 阶段0~1协议代码落地。
+- RFC 9000/9001/9002 约束下的 VN、Initial/Handshake/1-RTT、CRYPTO、ACK、HTTP/0.9 最小下载链路实现。
+
+下一步
+1. 进入步骤00+01真实实现：先做无状态 VN、不变量解析、dispatcher/conn/tls adapter 的行为扩展。
+2. 在当前 demo/interop 骨架上逐步替换 `--self-check` 空壳，开始接入真实握手路径与最小 HTTP/0.9 下载。
+3. 保持未实现 testcase 返回 `127`，直到对应阶段能力真正完成。
+
+关键文件
+- `ai-quic/CMakeLists.txt`
+- `ai-quic/interop/run_endpoint.sh`
+- `docs/plans/step01-handshake-doc-index.md`
+- `docs/plans/step01-handshake-logic-design.md`
+- `docs/plans/repo-file-hierarchy.md`
+- `debug`
+
+待确认 / 风险
+- 当前 interop 结果为 `UNSUPPORTED`，这符合基础阶段目标，但还不能证明任何 QUIC 协议语义正确。
+- 根目录 `Makefile` 已收敛 unsupported run 的摘要日志；若后续需要保存 qns 更细粒度目录，可再扩展 wrapper。
+
+如需用户执行
+- none
+
+最近验证
+- `make build`
+- `make quic-demo-server`
+- `make quic-demo-client`
+- `cd ai-quic/build && ctest --output-on-failure`
+- `make interop-ai-server`
+- `make interop-ai-client`
+
+# 阶段7 / handshake interop 调试断点（更新于 2026-04-15）
+
+当前分析
+- 双向 `handshake` 失败的主因已经进一步收敛，不是“打印不够”，而是当前 `ai-quic` 仍未使用 RFC 9000/9001 的标准 QUIC 包格式和包保护。
+- 最新打印已经证明：`xquic -> ai-quic` 方向里，我们能走过不变量和部分长头字段，但在 payload 处失败；失败细节是 `payload_is_likely_protected_ciphertext`，说明当前解码器把真实 QUIC `Initial` 的密文 payload 当成明文 frame 去解了。
+- `ai-quic -> xquic` 方向里，我们自己发出的首包仍是 toy 格式，首字节和后续布局都还不是标准 QUIC v1 `Initial`，所以 `xquic` 不会继续处理。
+- 本地 `docs` 已确认关键规范位置：
+- `docs/ietf/txt/rfc9000.txt`：长头、帧格式、packet number、ACK/CRYPTO/STREAM/HANDSHAKE_DONE 语义。
+- `docs/ietf/txt/rfc9001.txt`：Initial salt、`client in`/`server in` secret、`quic key` / `quic iv` / `quic hp`、AEAD 与 header protection。
+- `docs/refs/xquic.md`：服务端首次收到 `Initial` 后，先派生 Initial keys，再 unprotect/decrypt，再把 `CRYPTO` bytes 送给 TLS。
+
+已确认的问题点
+- `ai-quic/src/tls/initial_secret.c` 还是 toy 派生：`sha256(seed || "ai-quic-initial")`，不符合 `rfc9001` 第 5.2 节要求的固定 salt + HKDF。
+- `ai-quic/src/transport/packet_codec.c` 仍是 toy 包格式：
+- 长头首字节硬编码成 `0xc3 / 0xe3`。
+- short header 仍是自定义 `0x43`。
+- 显式 CID 长度 + 固定 4 字节 packet number + 裸 frame payload。
+- 没有 header protection，也没有 AEAD seal/open。
+- `ai-quic/src/transport/frame_codec.c` 虽然 `CRYPTO` / `STREAM` / `HANDSHAKE_DONE` 的 frame type 大体贴近 RFC，但 `ACK` 编解码还是不完整，后续与真实对端互通时大概率还要继续修。
+- TLS 这层已经有可复用的真实 secret：
+- `ai-quic/src/tls/tls_ctx.c` 的 BoringSSL QUIC 回调会把 `read_levels[]` / `write_levels[]` secret 和 cipher suite 存下来。
+- 这些 secret 正是后续实现 Handshake / 1-RTT 包保护要直接复用的入口。
+
+这轮额外补强
+- `ai-quic/src/transport/packet_codec.c` 已加更细的 decode failure 细节记录。
+- `ai-quic/src/transport/endpoint.c` 会把 `detail=` 带进 `packet decode failed` 错误信息里。
+- 现在 interop 日志已经能区分：是长头字段解析失败，还是 token/length/PN 解析失败，还是“payload 看起来仍是密文”。
+
+下一步计划
+1. 先按 `docs/ietf/txt/rfc9001.txt` 第 5.2 / 5.3 / 5.4 节，把 `Initial` secret 派生改成标准 HKDF 版本，并补 `quic key` / `quic iv` / `quic hp` 派生。
+2. 在 transport 内新增最小 packet protection 层，优先打通 `Initial`：
+   - long header 标准编码/解码
+   - packet number 截断与恢复
+   - header protection remove/apply
+   - AEAD open/seal
+3. 先让 `xquic -> ai-quic` 能正确解出 `Initial` 里的 `CRYPTO`，把 `ClientHello` 真正送进 BoringSSL。
+4. 再让 `ai-quic -> xquic` 发出的 `Initial` 变成标准 QUIC v1 包，确认对端能进入握手推进。
+5. `Initial` 打通后，再补 Handshake / 1-RTT 的同类保护逻辑，并回头修正 `ACK` frame 的 RFC 细节。
+
+当前不继续推进的原因
+- 用户要求先把分析和计划记录到 `break` 并暂停，所以实现工作暂时停在这里。
+
+# 阶段7 / handshake interop 调试断点（更新于 2026-04-15 14:00 +0800）
+
+本轮新增进展
+- `packet_codec.c` 已改成能真正对接 BoringSSL 导出的 packet secret：
+  - 修复了 TLS 1.3 cipher suite ID 映射，兼容 `SSL_CIPHER_get_protocol_id()` 返回的 `0x1301/0x1302/0x1303`
+  - 因此 `xquic -> ai-quic` 方向不再卡在 `packet secret unavailable type=1 cipher=0x00001301`
+- `crypto_stream.c` 已从“只能严格连续 offset”改成最小可用的重传容忍：
+  - 允许完整重复和前缀重叠的 `CRYPTO` frame
+  - 只有真正出现 gap 时才报 `crypto offset mismatch`
+- `frame_codec.c` 里的 ACK 编码/解码已修正：
+  - 之前 `ack_delay / ack_range_count / first_ack_range` 的 varint 写入会发生覆盖
+  - 这会导致发给对端的 ACK frame 线缆格式不合法
+
+本轮验证
+- `./ai-quic/build/bin/ai_quic_unit_test` 通过
+- `./ai-quic/build/bin/ai_quic_integration_test` 通过
+- 多轮 `make interop-handshake-server` 已重跑
+
+最新现象
+- 最新失败样本：
+  - `artifacts/interop/2026-04-15T13-39-48-ai-quic-xquic-handshake/...`
+- 服务端不再主动报错退出，而是一直存活到被 runner 超时强杀
+- `server.qlog` 已证明我们当前至少做到了：
+  - 成功解密并处理 xquic 的 client Initial
+  - 成功发送自己的 `Initial`
+  - 成功发送自己的 `Handshake`
+  - qlog 中可见：
+    - `transport:packet_sent initial pn=0`
+    - `transport:packet_sent initial pn=1`
+    - `transport:packet_sent handshake pn=0`
+- 但 xquic client 仍然完全停在 `C_INITIAL_SENT`
+  - `client.log` 反复只发 `pkt_type:INIT|frame:PADDING CRYPTO`
+  - 结束统计里仍是：
+    - `handshake_time:0`
+    - `hsk_recv:0`
+    - `last_recv:0`
+    - `keyupdate_cnt:0`
+    - `alpn:` 为空
+- 也就是说：xquic 仍然没有把我们回的 server flight 认成可接受的 QUIC/TLS 握手数据
+
+当前最可疑的新卡点
+1. 我们的 server `Initial/Handshake` flight 虽然“能发”，但仍有线缆级细节不符合 xquic 预期
+   - 可能在 long header / reserved bits / length / PN / header protection / AEAD AAD 某个细节
+   - 也可能在 `CRYPTO` 内容之外还夹带了对端无法接受的 frame 组合
+2. `pcap` 观察到异常：
+   - 用 `tcpdump` 看最新 `trace_node_left/right.pcap` 时，只明显看到了 `client -> server` 的 UDP 1200 字节包
+   - 没直接看到 `server -> client` 的 178 / 50 / 715 字节回包
+   - 但 `server.log` 中 `sendto()` 成功后确实打印了这些发送日志
+   - 这说明下一步需要优先确认：是抓包视角问题，还是 server flight 实际没有正确出现在网络路径上
+
+下一步建议
+1. 优先核对 `server -> client` flight 是否真正上网：
+   - 从 `pcap` 再精确验证服务端回包方向、源端口和长度
+   - 必要时在 demo server 里打印 `sendto()` 的本地 socket/peer 信息
+2. 若确认包确实发到了 client，则继续收敛 xquic 为什么完全不计入 `last_recv/hsk_recv`
+   - 重点核查 server Initial/Handshake 的 header protection、AAD、length、ACK+CRYPTO 组合、TLS flight 内容
+3. 必要时给发送侧再补一层逐包 field dump：
+   - `pn_len`
+   - `length field`
+   - `aad len`
+   - `ciphertext len`
+   - `sample offset`
+   - `token len`

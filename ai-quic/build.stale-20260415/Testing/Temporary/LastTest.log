@@ -1,0 +1,19 @@
+Start testing: Apr 14 18:08 CST
+----------------------------------------------------------
+1/1 Testing: ai_quic_smoke_test
+1/1 Test: ai_quic_smoke_test
+Command: "/home/racosel/Desktop/quic-1 (copy)/ai-quic/build/bin/ai_quic_smoke_test"
+Directory: /home/racosel/Desktop/quic-1 (copy)/ai-quic/build
+"ai_quic_smoke_test" start time: Apr 14 18:08 CST
+Output:
+----------------------------------------------------------
+ai_quic_smoke_test: ok
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"ai_quic_smoke_test" end time: Apr 14 18:08 CST
+"ai_quic_smoke_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Apr 14 18:08 CST

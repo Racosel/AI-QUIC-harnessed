@@ -1,0 +1,2 @@
+/usr/bin/ar qc lib/libai_quic_common.a CMakeFiles/ai_quic_common.dir/src/common/fs.c.o CMakeFiles/ai_quic_common.dir/src/common/log.c.o CMakeFiles/ai_quic_common.dir/src/common/result.c.o
+/usr/bin/ranlib lib/libai_quic_common.a

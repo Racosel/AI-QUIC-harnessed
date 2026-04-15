@@ -1,0 +1,115 @@
+# Bug 001
+
+- 时间：2026-04-14 17:52:38 +0800
+- 阶段：阶段0~1启动检查
+- 标题：`ai-quic/` 缺少阶段0~1所需的最小源码与构建骨架
+- 现象：
+  - 当前 `ai-quic/` 下除 `boringssl/` 外，未发现 `include/`、`src/`、`demo/`、`interop/`、`tests/` 等步骤0~1实现骨架。
+  - `ai-quic/` 范围内目前可见的构建文件仅有 `ai-quic/boringssl/CMakeLists.txt`。
+  - `quic-interop-runner/implementations_quic.json` 虽然注册了 `ai-quic-interop:latest`，但当前仓库未见对应 `ai-quic/interop/`、Dockerfile 或镜像入口脚本。
+- 影响：
+  - 无法在现有仓库骨架上直接进入 `dispatcher / quic_conn / tls adapter / demo / interop` 的增量实现。
+  - 若继续编码，将同时引入“协议实现”和“项目初始化/构建系统设计”两类高风险改动。
+  - 无法在 runner 契约下构建并验证我方阶段0~1实现。
+- 根因：
+  - 当前仓库尚未重新落地 AI-QUIC 自身的源码、测试与 interop 目录骨架。
+- 修复：
+  - 待确认是否允许先创建最小项目骨架，再进入阶段0~1协议编码。
+- 验证：
+  - `find ai-quic -maxdepth 2 -type f \( -name 'CMakeLists.txt' -o -name 'Makefile' -o -name '*.c' -o -name '*.cc' -o -name '*.h' \) | sort`
+  - `find ai-quic -maxdepth 2 -mindepth 1 \( -type d -o -type f \) | sort`
+  - `sed -n '1,120p' quic-interop-runner/implementations_quic.json`
+- 相关文件：
+  - `ai-quic/`
+  - `docs/plans/repo-file-hierarchy.md`
+  - `docs/plans/step01-handshake-logic-design.md`
+- 状态：已修复
+
+修复结果
+- 已创建 `ai-quic/` 最小项目骨架与独立 `CMakeLists.txt`，并接入仓库内 `boringssl/` 作为 in-tree 依赖。
+- 已新增 `ai_quic_common`、`ai_quic_tls`、`ai_quic_transport` 三个静态库，以及 `ai_quic_demo_server`、`ai_quic_demo_client`、`ai_quic_smoke_test` 三个可执行目标。
+- 已新增 `ai-quic/interop/Dockerfile` 与 `ai-quic/interop/run_endpoint.sh`，镜像名保持 `ai-quic-interop:latest`，未实现 testcase 统一返回 `127`。
+- 已扩展根目录 `Makefile`：`make build`、`make ai-quic-interop-image`、`make quic-demo-server`、`make quic-demo-client`、`make interop-ai-server`、`make interop-ai-client`、`make interop-logs`、`make clean` 可用。
+- 已把 `ai_quic_*` 命名约束写入 `ai-quic/README.md`、`docs/plans/plan-quic.md` 与 `docs/plans/step01-handshake-logic-design.md`。
+
+补充问题
+- 互通过程中发现 `quic-interop-runner` 对 `UNSUPPORTED` 默认不保存测试目录，因此根目录 `Makefile` 额外收敛了 `runner-output.txt` 与 `run-meta.txt`，保证日志不会丢失。
+- 互通过程中发现根目录 `latest` 符号链接原先在错误目录下创建，现已修正为在仓库根目录的 `artifacts/interop/` 下维护。
+
+修复后验证
+- `make build`
+- `make quic-demo-server`
+- `make quic-demo-client`
+- `cd ai-quic/build && ctest --output-on-failure`
+- `make interop-ai-server`
+- `make interop-ai-client`
+
+# Bug 002
+
+- 时间：2026-04-15 16:10:45 +0800
+- 阶段：阶段7 handshake interop 调试
+- 标题：`xquic server <- ai-quic client` 已进入真实握手交换，但 `ai-quic` client 收到 server flight 后未继续回包
+- 现象：
+  - 旧问题已被排除：
+    - `WAIT` 探测包仍会触发一次预期的 Version Negotiation 噪音，但不再是主阻塞。
+    - `pcap` 已能看到真实 `193.167.0.100 -> 193.167.100.100:443` 的 1200 字节 QUIC Initial。
+    - `xquic` 不再报 `hostname is NULL`，而是明确记录 `sni:server4`。
+  - 最新样本 `artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake/...` 中：
+    - `client.log` 记录我方发出 1 个 `Initial`
+    - `client.log` 与 `client.qlog` 记录已收到多条 server `Initial` / `Handshake`：
+      - 1200 字节 `Initial`
+      - 191 / 524 字节 `Handshake`
+      - 后续 PTO 重传的 `Initial` / `Handshake`
+    - 但我方 client 在这些 `packet_received` 之后，没有任何新的 `packet_sent`
+  - `xquic` server 端已完整推进到发送 server flight：
+    - 收到并解密 client `Initial`
+    - 处理 `CRYPTO`
+    - 发送 `Initial`、多个 `Handshake` 包
+    - 之后由于迟迟收不到 client 后续包，进入 PTO 重传
+- 影响：
+  - 当前 `xquic-ai-quic handshake` 已不再卡在网络、SNI 或首包不可识别上。
+  - 主阻塞变成 ai-quic client 收到 server flight 后没有产出后续握手数据，导致握手停在中途并最终超时。
+- 根因分析：
+  - 当前最可疑的是 ai-quic client 收包后的“产包”链路，而不是收包链路：
+    - `client.qlog` 已把 server `Initial` / `Handshake` 记成 `packet_received`，说明至少已经走过了解包与基本包分类。
+    - 但收包后未见新的 pending datagram 被送出，说明 `ACK`/`CRYPTO` 生成或 flush 逻辑没有被正确触发。
+  - 代码上有两个高疑点：
+    - `ai-quic/src/transport/conn_io.c`
+      - 当前纯 ACK 不会单独发包，ACK 仅在构建 CRYPTO packet 时顺带写出。
+      - 如果 TLS 侧没有新 `WRITE_CRYPTO` 事件，即使 `ack_needed=1`，也可能不会产出任何 datagram。
+    - `ai-quic` client 的 TLS/握手推进路径
+      - 虽然已安装 handshake keys，并能消费 server `Initial` / `Handshake`
+      - 但喂入这些包后，BoringSSL/transport 侧没有继续产出应答用的 client `Handshake CRYPTO` / `Finished`
+- 已做修复：
+  - `ai-quic/interop/setup.sh`
+    - 新增 QNS 路由与 tx checksum offload 关闭，保证 QUIC UDP 能进入模拟链路
+  - `ai-quic/interop/run_endpoint.sh`
+    - client 增加有界启动延迟，避免在 sim 场景尚未激活时过早发出首包
+  - `ai-quic/include/ai_quic/tls.h`
+  - `ai-quic/src/tls/tls_internal.h`
+  - `ai-quic/src/tls/tls_ctx.c`
+  - `ai-quic/src/transport/conn_io.c`
+    - 已把 `authority` 传入 TLS，并在 BoringSSL QUIC client 启动前设置 SNI
+- 证据：
+  - `artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake/runner/xquic_ai-quic/handshake/client/client.log`
+  - `artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake/runner/xquic_ai-quic/handshake/client/qlog/client.qlog`
+  - `artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake/runner/xquic_ai-quic/handshake/server/server.log`
+  - `artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake/runner/xquic_ai-quic/handshake/sim/trace_node_left.pcap`
+- 下一步：
+  1. 在 client 收包后的 transport/TLS 路径补更细日志，确认 `ai_quic_tls_session_provide_crypto()` 后是否真的生成了 `WRITE_CRYPTO` 事件。
+  2. 核对 `ai_quic_conn_flush_pending()` 是否因为“没有新 CRYPTO 事件”而漏发 ACK；必要时补最小可用的纯 ACK 发送路径。
+  3. 若 TLS 已产出 client `Handshake` 数据但没有发出，再继续查 pending datagram queue / demo client flush 逻辑。
+- 最近验证：
+  - `make interop-handshake-client`
+  - 最新失败目录：`artifacts/interop/2026-04-15T16-10-37-xquic-ai-quic-handshake`
+[2026-04-15] handshake debug 收敛总结
+- 先按 docs/ietf/txt/rfc9000.txt 17.2.4、docs/ietf/txt/rfc9001.txt 4.9、docs/plans/step01-handshake-logic-design.md 4.3 核对：client 收到 server Handshake 后必须继续用 Handshake 包发送 ACK 与后续握手消息。
+- 最新 client 日志证明旧问题是双重阻塞：transport 层没有 ACK-only 路径；TLS 在早期 Handshake 分片后未立即产出 WRITE_CRYPTO，导致 ack_needed=1 时完全静默。
+- 修复1：conn_io.c 补 ACK-only datagram，收到 Initial/Handshake 即可单独发 ACK，不再依赖 TLS WRITE_CRYPTO 顺带发送。
+- 修复2：frame_codec.c/conn_io.c 补真实 1-RTT 互通所需最小集合：允许 app-level CRYPTO 喂给 TLS 处理 post-handshake；解码并忽略 PING、NEW_TOKEN、NEW_CONNECTION_ID；支持 ACK_ECN 与标准 STREAM flag 解析。
+- 修复3：stream.c 将 STREAM 接收改成接受重复/重叠重传；conn_io.c 去掉 server 解析完 GET 后对接收流状态的 reset，避免对端重复请求分片触发 stream receive failed。
+- 修复4：http09_server.c 不再在 handshake_confirmed 后立即退出，继续等待请求/响应完成。
+- 验证结果：
+  - make interop-handshake-client 成功，日志目录 artifacts/interop/2026-04-15T16-28-15-xquic-ai-quic-handshake
+  - make interop-handshake-server 成功，日志目录 artifacts/interop/2026-04-15T16-32-23-ai-quic-xquic-handshake
+- 当前状态：阶段 1 的双向 handshake 已通过；后续若继续推进 transfer/更多 testcase，可优先补更多 1-RTT frame 语义与更完整的流量控制/连接 ID 管理。

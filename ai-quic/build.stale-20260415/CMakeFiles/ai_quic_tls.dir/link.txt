@@ -1,0 +1,2 @@
+/usr/bin/ar qc lib/libai_quic_tls.a CMakeFiles/ai_quic_tls.dir/src/tls/tls_ctx.c.o
+/usr/bin/ranlib lib/libai_quic_tls.a
