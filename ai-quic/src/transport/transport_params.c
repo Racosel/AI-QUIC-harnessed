@@ -117,10 +117,10 @@ void ai_quic_transport_params_init(ai_quic_transport_params_t *params) {
 
   memset(params, 0, sizeof(*params));
   params->max_udp_payload_size = 65527u;
-  params->initial_max_data = 65536u;
-  params->initial_max_stream_data_bidi_local = 65536u;
-  params->initial_max_stream_data_bidi_remote = 65536u;
-  params->initial_max_streams_bidi = 1u;
+  params->initial_max_data = AI_QUIC_INITIAL_MAX_DATA;
+  params->initial_max_stream_data_bidi_local = AI_QUIC_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL;
+  params->initial_max_stream_data_bidi_remote = AI_QUIC_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE;
+  params->initial_max_streams_bidi = 32u;
   params->max_idle_timeout_ms = 30000u;
 }
 

@@ -1757,89 +1757,7 @@ ssize_t quic_build_version_negotiation(
   - 缺失 CRYPTO 数据
   - 错误 encryption level 的 CRYPTO frame
 
-#### 步骤02：密码套件约束能力（ChaCha20）
-
-**`mvfst` 对应锚点**
-
-- `quic/client/handshake/*`
-- `quic/server/handshake/*`
-- `quic/fizz/client/handshake/*`
-- `quic/fizz/server/handshake/*`
-- `quic/fizz/handshake/QuicFizzFactory.cpp`
-- `quic/fizz/handshake/test/FizzCryptoFactoryTest.cpp`
-- `quic/fizz/handshake/test/FizzPacketNumberCipherTest.cpp`
-
-**建议实现目标**
-
-- 把“TLS 选择的密码套件”和“QUIC transport 本身的逻辑”完全解耦。
-- 在架构上，transport 不应该关心现在是 AES-GCM 还是 ChaCha20，它只应关心：
-  - 当前 encryption level 是否有 read/write AEAD
-  - 当前 encryption level 是否有 header protection cipher
-
-**建议实现方式**
-
-- 设计 `quic_cipher_suite_ops` 或等价表驱动结构，集中描述：
-  - AEAD key 长度
-  - nonce 长度
-  - header protection 算法
-  - HKDF label / secret derivation 入口
-- Initial 的 salt/secret 派生由 QUIC version 决定；Handshake/1-RTT 的具体套件由 TLS 决定。两者不要混在一起。
-- 头部保护与 payload AEAD 必须是两个独立对象，不能偷懒合并。
-
-**注意事项**
-
-- 很多新实现容易把“套件切换”写成一堆散落在 transport 各处的 `if (chacha20)`；这是后期最难维护的形态。
-- Header protection 的采样位置、密钥长度、掩码生成方式都可能因算法不同而不同，必须有独立单测。
-- 不要把 Initial 的 cipher suite 选择和 TLS 的协商结果绑定；Initial 是版本固定推导，不随 TLS 协商改变。
-
-**验收建议**
-
-- 强制 ChaCha20 套件时，握手和小文件下载仍可成功。
-- 单测应覆盖：
-  - AEAD 加解密
-  - header protection/unprotection
-  - 错误 key/nonce 的失败路径
-
-#### 步骤03：QUIC v2 协商与兼容
-
-**对 `mvfst` 的客观结论**
-
-- `mvfst` 源码在版本层面确实留有多版本入口，例如：
-  - `getQuicVersionSalt(version)`
-  - server 侧 `supportedVersions`
-  - 若干 codec / test 中的版本列表与别名处理
-  - token/cid 等局部逻辑中的版本区分
-- 但就本次阅读范围而言，**本文没有把 `mvfst` 当作一个“现成可照抄的 QUIC v2 interop 教程”来使用**。更准确地说，它提供的是“如何把版本差异收敛到少数模块”的架构思路。
-
-**推荐做法**
-
-- 为新 C 栈设计 `quic_version_ops_t`，把版本差异集中进下列位置：
-  - Initial salt
-  - 长首部类型/首字节映射
-  - Retry 相关版本参数
-  - 版本支持列表与协商逻辑
-  - 与版本相关的调试/日志展示
-- 尽量避免在 stream/loss/flow control/path 等高层模块里出现大量版本分支。
-
-**注意事项**
-
-- `v2` 阶段的目标是“把版本差异约束在 codec/crypto/dispatch 边界”，不是重写一套新的连接状态机。
-- 不要把“支持 v2”做成编译期宏分裂出两套代码路径；优先使用运行时版本表。
-- 如果当前阶段只需要与 interop case 对齐，就只实现 test case 真正需要的 v2 能力，不要提前铺大量实验版本兼容代码。
-
-**验收建议**
-
-- v1 和 v2 至少应共享同一套：
-  - connection state
-  - stream manager
-  - loss recovery
-  - flow control
-- 新增测试重点应放在：
-  - Initial key derivation 是否切换到对应 salt
-  - 长首部编解码是否按版本生效
-  - 从支持版本集合中正确协商/拒绝
-
-#### 步骤04：流控与多流传输基础（transfer）
+#### 步骤02：流控与多流传输基础（transfer）
 
 **`mvfst` 对应锚点**
 
@@ -1897,6 +1815,88 @@ ssize_t quic_build_version_negotiation(
   - RESET_STREAM
   - stream limit 超限
   - `MAX_DATA` / `MAX_STREAM_DATA` 更新时机
+
+#### 步骤03：QUIC v2 协商与兼容
+
+**对 `mvfst` 的客观结论**
+
+- `mvfst` 源码在版本层面确实留有多版本入口，例如：
+  - `getQuicVersionSalt(version)`
+  - server 侧 `supportedVersions`
+  - 若干 codec / test 中的版本列表与别名处理
+  - token/cid 等局部逻辑中的版本区分
+- 但就本次阅读范围而言，**本文没有把 `mvfst` 当作一个“现成可照抄的 QUIC v2 interop 教程”来使用**。更准确地说，它提供的是“如何把版本差异收敛到少数模块”的架构思路。
+
+**推荐做法**
+
+- 为新 C 栈设计 `quic_version_ops_t`，把版本差异集中进下列位置：
+  - Initial salt
+  - 长首部类型/首字节映射
+  - Retry 相关版本参数
+  - 版本支持列表与协商逻辑
+  - 与版本相关的调试/日志展示
+- 尽量避免在 stream/loss/flow control/path 等高层模块里出现大量版本分支。
+
+**注意事项**
+
+- `v2` 阶段的目标是“把版本差异约束在 codec/crypto/dispatch 边界”，不是重写一套新的连接状态机。
+- 不要把“支持 v2”做成编译期宏分裂出两套代码路径；优先使用运行时版本表。
+- 如果当前阶段只需要与 interop case 对齐，就只实现 test case 真正需要的 v2 能力，不要提前铺大量实验版本兼容代码。
+
+**验收建议**
+
+- v1 和 v2 至少应共享同一套：
+  - connection state
+  - stream manager
+  - loss recovery
+  - flow control
+- 新增测试重点应放在：
+  - Initial key derivation 是否切换到对应 salt
+  - 长首部编解码是否按版本生效
+  - 从支持版本集合中正确协商/拒绝
+
+#### 步骤04：密码套件约束能力（ChaCha20）
+
+**`mvfst` 对应锚点**
+
+- `quic/client/handshake/*`
+- `quic/server/handshake/*`
+- `quic/fizz/client/handshake/*`
+- `quic/fizz/server/handshake/*`
+- `quic/fizz/handshake/QuicFizzFactory.cpp`
+- `quic/fizz/handshake/test/FizzCryptoFactoryTest.cpp`
+- `quic/fizz/handshake/test/FizzPacketNumberCipherTest.cpp`
+
+**建议实现目标**
+
+- 把“TLS 选择的密码套件”和“QUIC transport 本身的逻辑”完全解耦。
+- 在架构上，transport 不应该关心现在是 AES-GCM 还是 ChaCha20，它只应关心：
+  - 当前 encryption level 是否有 read/write AEAD
+  - 当前 encryption level 是否有 header protection cipher
+
+**建议实现方式**
+
+- 设计 `quic_cipher_suite_ops` 或等价表驱动结构，集中描述：
+  - AEAD key 长度
+  - nonce 长度
+  - header protection 算法
+  - HKDF label / secret derivation 入口
+- Initial 的 salt/secret 派生由 QUIC version 决定；Handshake/1-RTT 的具体套件由 TLS 决定。两者不要混在一起。
+- 头部保护与 payload AEAD 必须是两个独立对象，不能偷懒合并。
+
+**注意事项**
+
+- 很多新实现容易把“套件切换”写成一堆散落在 transport 各处的 `if (chacha20)`；这是后期最难维护的形态。
+- Header protection 的采样位置、密钥长度、掩码生成方式都可能因算法不同而不同，必须有独立单测。
+- 不要把 Initial 的 cipher suite 选择和 TLS 的协商结果绑定；Initial 是版本固定推导，不随 TLS 协商改变。
+
+**验收建议**
+
+- 强制 ChaCha20 套件时，握手和小文件下载仍可成功。
+- 单测应覆盖：
+  - AEAD 加解密
+  - header protection/unprotection
+  - 错误 key/nonce 的失败路径
 
 #### 步骤05：Token 与地址验证链路（retry）
 
@@ -2260,7 +2260,7 @@ ssize_t quic_build_version_negotiation(
 
 - H3 阶段最容易暴露 transport 里的流状态 bug，而不是 H3 语义本身。
 - 在 transport 尚未稳固前，不要过早优化 QPACK 或优先级策略。
-- H3 控制流、QPACK encoder/decoder stream 都依赖单向流方向约束，若步骤04 的 stream 方向模型不干净，这一步会非常痛苦。
+- H3 控制流、QPACK encoder/decoder stream 都依赖单向流方向约束，若步骤02 的 stream 方向模型不干净，这一步会非常痛苦。
 
 **验收建议**
 
@@ -2326,24 +2326,28 @@ ssize_t quic_build_version_negotiation(
 
 如果把 `plan-quic` 和 `mvfst` 的高层架构合起来看，我建议后续开发纪律如下：
 
-1. 步骤01-03 只碰：
+1. 步骤01 先只碰：
    - invariant / codec
    - TLS adapter
    - connection handshake core
    - 基础 timer
 
-2. 步骤04-06 才重点碰：
+2. 步骤02-03 重点碰：
    - stream manager
    - flow control
    - scheduler
+   - version-specific codec / salt / VN 边界
+
+3. 步骤04-06 再重点碰：
+   - TLS cipher suite policy
    - loss detection / PTO / congestion control
 
-3. 步骤07-09 把注意力放在：
+4. 步骤07-09 把注意力放在：
    - TLS 会话状态外化
    - 0-RTT 接受/拒绝语义
    - AppData key phase 管理
 
-4. 步骤10-13 再逐步开放：
+5. 步骤10-13 再逐步开放：
    - path manager
    - CID 池
    - migration policy

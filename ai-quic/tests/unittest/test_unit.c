@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ai_quic/dispatcher.h"
+#include "ai_quic/log.h"
 #include "common_internal.h"
 #include "transport_internal.h"
 
@@ -195,6 +196,184 @@ static int test_transport_params_validation(void) {
   return 0;
 }
 
+static int test_flow_control_frames_roundtrip(void) {
+  ai_quic_frame_t frame;
+  ai_quic_frame_t decoded;
+  uint8_t buffer[64];
+  size_t written;
+  size_t consumed;
+
+  memset(&frame, 0, sizeof(frame));
+  frame.type = AI_QUIC_FRAME_MAX_DATA;
+  frame.payload.max_data.maximum_data = 12345u;
+  AI_QUIC_ASSERT(ai_quic_frame_encode(&frame, buffer, sizeof(buffer), &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_frame_decode(buffer, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(consumed, written);
+  AI_QUIC_ASSERT_EQ(decoded.type, AI_QUIC_FRAME_MAX_DATA);
+  AI_QUIC_ASSERT_EQ(decoded.payload.max_data.maximum_data, 12345u);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.type = AI_QUIC_FRAME_MAX_STREAM_DATA;
+  frame.payload.max_stream_data.stream_id = 8u;
+  frame.payload.max_stream_data.maximum_stream_data = 65536u;
+  AI_QUIC_ASSERT(ai_quic_frame_encode(&frame, buffer, sizeof(buffer), &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_frame_decode(buffer, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(decoded.type, AI_QUIC_FRAME_MAX_STREAM_DATA);
+  AI_QUIC_ASSERT_EQ(decoded.payload.max_stream_data.stream_id, 8u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.max_stream_data.maximum_stream_data, 65536u);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.type = AI_QUIC_FRAME_DATA_BLOCKED;
+  frame.payload.data_blocked.limit = 777u;
+  AI_QUIC_ASSERT(ai_quic_frame_encode(&frame, buffer, sizeof(buffer), &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_frame_decode(buffer, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(decoded.type, AI_QUIC_FRAME_DATA_BLOCKED);
+  AI_QUIC_ASSERT_EQ(decoded.payload.data_blocked.limit, 777u);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.type = AI_QUIC_FRAME_STREAM_DATA_BLOCKED;
+  frame.payload.stream_data_blocked.stream_id = 4u;
+  frame.payload.stream_data_blocked.limit = 4096u;
+  AI_QUIC_ASSERT(ai_quic_frame_encode(&frame, buffer, sizeof(buffer), &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_frame_decode(buffer, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(decoded.type, AI_QUIC_FRAME_STREAM_DATA_BLOCKED);
+  AI_QUIC_ASSERT_EQ(decoded.payload.stream_data_blocked.stream_id, 4u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.stream_data_blocked.limit, 4096u);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.type = AI_QUIC_FRAME_ACK;
+  frame.payload.ack.largest_acked = 5u;
+  frame.payload.ack.first_ack_range = 0u;
+  frame.payload.ack.ack_range_count = 1u;
+  frame.payload.ack.ack_ranges[0].gap = 1u;
+  frame.payload.ack.ack_ranges[0].ack_range = 2u;
+  AI_QUIC_ASSERT(ai_quic_frame_encode(&frame, buffer, sizeof(buffer), &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_frame_decode(buffer, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(decoded.type, AI_QUIC_FRAME_ACK);
+  AI_QUIC_ASSERT_EQ(decoded.payload.ack.largest_acked, 5u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.ack.first_ack_range, 0u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.ack.ack_range_count, 1u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.ack.ack_ranges[0].gap, 1u);
+  AI_QUIC_ASSERT_EQ(decoded.payload.ack.ack_ranges[0].ack_range, 2u);
+  return 0;
+}
+
+static int test_ack_range_generation(void) {
+  ai_quic_packet_number_space_t space;
+  ai_quic_frame_t frame;
+
+  AI_QUIC_ASSERT(ai_quic_pn_space_init(&space, AI_QUIC_PN_SPACE_APP_DATA) == AI_QUIC_OK);
+  ai_quic_pn_space_on_packet_received(&space, 0u);
+  ai_quic_pn_space_on_packet_received(&space, 1u);
+  ai_quic_pn_space_on_packet_received(&space, 2u);
+  ai_quic_pn_space_on_packet_received(&space, 5u);
+
+  memset(&frame, 0, sizeof(frame));
+  ai_quic_build_ack_frame(&space, &frame);
+  AI_QUIC_ASSERT_EQ(frame.type, AI_QUIC_FRAME_ACK);
+  AI_QUIC_ASSERT_EQ(frame.payload.ack.largest_acked, 5u);
+  AI_QUIC_ASSERT_EQ(frame.payload.ack.first_ack_range, 0u);
+  AI_QUIC_ASSERT_EQ(frame.payload.ack.ack_range_count, 1u);
+  AI_QUIC_ASSERT_EQ(frame.payload.ack.ack_ranges[0].gap, 1u);
+  AI_QUIC_ASSERT_EQ(frame.payload.ack.ack_ranges[0].ack_range, 2u);
+  return 0;
+}
+
+static int test_stream_reassembly_out_of_order(void) {
+  ai_quic_stream_manager_t manager;
+  ai_quic_stream_state_t *stream;
+  ai_quic_stream_frame_t frame;
+  static const uint8_t kWorld[] = "world";
+  static const uint8_t kHello[] = "hello";
+
+  ai_quic_stream_manager_init(&manager);
+  stream = ai_quic_stream_manager_open_local_bidi(&manager, 65536u, 65536u);
+  AI_QUIC_ASSERT(stream != NULL);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.stream_id = stream->stream_id;
+  frame.offset = 5u;
+  frame.data_len = sizeof(kWorld) - 1u;
+  memcpy(frame.data, kWorld, frame.data_len);
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(stream->recv_contiguous_end, 0u);
+
+  frame.offset = 0u;
+  frame.data_len = sizeof(kHello) - 1u;
+  memcpy(frame.data, kHello, frame.data_len);
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(stream->recv_contiguous_end, 10u);
+  AI_QUIC_ASSERT(memcmp(stream->recv_data, "helloworld", 10u) == 0);
+
+  ai_quic_stream_manager_cleanup(&manager);
+  return 0;
+}
+
+static int test_stream_overlap_duplicate_and_final_size(void) {
+  ai_quic_stream_manager_t manager;
+  ai_quic_stream_state_t *stream;
+  ai_quic_stream_frame_t frame;
+
+  ai_quic_stream_manager_init(&manager);
+  stream = ai_quic_stream_manager_open_local_bidi(&manager, 65536u, 65536u);
+  AI_QUIC_ASSERT(stream != NULL);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.stream_id = stream->stream_id;
+  frame.offset = 0u;
+  frame.data_len = 5u;
+  frame.fin = 1;
+  memcpy(frame.data, "hello", 5u);
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(stream->recv_fin);
+  AI_QUIC_ASSERT(stream->final_size_known);
+  AI_QUIC_ASSERT_EQ(stream->final_size, 5u);
+
+  frame.offset = 0u;
+  frame.data_len = 5u;
+  frame.fin = 1;
+  memcpy(frame.data, "hello", 5u);
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+
+  frame.offset = 3u;
+  frame.data_len = 2u;
+  frame.fin = 0;
+  memcpy(frame.data, "lo", 2u);
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+
+  frame.offset = 5u;
+  frame.data_len = 1u;
+  frame.fin = 0;
+  frame.data[0] = '!';
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_ERROR);
+
+  ai_quic_stream_manager_cleanup(&manager);
+  return 0;
+}
+
+static int test_stream_flow_control_updates_on_consume(void) {
+  ai_quic_stream_manager_t manager;
+  ai_quic_stream_state_t *stream;
+
+  ai_quic_stream_manager_init(&manager);
+  stream = ai_quic_stream_manager_open_local_bidi(&manager, 1024u, 65536u);
+  AI_QUIC_ASSERT(stream != NULL);
+  stream->recv_contiguous_end = 40000u;
+  AI_QUIC_ASSERT(ai_quic_stream_consume(stream, 32768u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(stream->flow.update_pending);
+  AI_QUIC_ASSERT_EQ(stream->flow.recv_limit,
+                    32768u + 65536u + AI_QUIC_STREAM_RECV_LIMIT_RESERVE);
+  AI_QUIC_ASSERT_EQ(stream->flow.recv_consumed, 32768u);
+
+  ai_quic_flow_controller_set_send_limit(&stream->flow, 131072u);
+  AI_QUIC_ASSERT_EQ(stream->flow.send_limit, 131072u);
+  ai_quic_flow_controller_set_send_limit(&stream->flow, 1024u);
+  AI_QUIC_ASSERT_EQ(stream->flow.send_limit, 131072u);
+
+  ai_quic_stream_manager_cleanup(&manager);
+  return 0;
+}
+
 static int test_stream_before_1rtt_rejected(void) {
   ai_quic_conn_impl_t *conn;
   ai_quic_packet_t packet;
@@ -227,13 +406,19 @@ static int test_stream_before_1rtt_rejected(void) {
 }
 
 int main(void) {
+  ai_quic_log_set_level(AI_QUIC_LOG_ERROR);
   AI_QUIC_ASSERT(test_version_negotiation_packet() == 0);
   AI_QUIC_ASSERT(test_wait_probe_routes_to_version_negotiation() == 0);
   AI_QUIC_ASSERT(test_client_initial_padding() == 0);
   AI_QUIC_ASSERT(test_qlog_json_seq_survives_early_read() == 0);
   AI_QUIC_ASSERT(test_pn_spaces_independent() == 0);
   AI_QUIC_ASSERT(test_transport_params_validation() == 0);
+  AI_QUIC_ASSERT(test_flow_control_frames_roundtrip() == 0);
+  AI_QUIC_ASSERT(test_stream_reassembly_out_of_order() == 0);
+  AI_QUIC_ASSERT(test_stream_overlap_duplicate_and_final_size() == 0);
+  AI_QUIC_ASSERT(test_stream_flow_control_updates_on_consume() == 0);
   AI_QUIC_ASSERT(test_stream_before_1rtt_rejected() == 0);
+  AI_QUIC_ASSERT(test_ack_range_generation() == 0);
   puts("ai_quic_unit_test: ok");
   return 0;
 }

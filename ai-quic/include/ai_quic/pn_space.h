@@ -6,6 +6,8 @@
 
 #include "ai_quic/packet.h"
 
+#define AI_QUIC_MAX_TRACKED_ACK_RANGES 32u
+
 typedef enum ai_quic_packet_number_space_id {
   AI_QUIC_PN_SPACE_INITIAL = 0,
   AI_QUIC_PN_SPACE_HANDSHAKE = 1,
@@ -24,15 +26,23 @@ typedef struct ai_quic_crypto_stream_state {
   uint64_t tx_next_offset;
 } ai_quic_crypto_stream_state_t;
 
+typedef struct ai_quic_packet_range {
+  uint64_t start;
+  uint64_t end;
+} ai_quic_packet_range_t;
+
 typedef struct ai_quic_packet_number_space {
   ai_quic_packet_number_space_id_t id;
   uint64_t next_packet_number;
-  uint64_t largest_acked;
+  uint64_t largest_received_packet_number;
+  uint64_t largest_acked_by_peer;
   uint64_t bytes_in_flight;
   uint64_t pto_deadline_ms;
   int ack_needed;
   ai_quic_key_state_t key_state;
   ai_quic_crypto_stream_state_t crypto_stream;
+  size_t received_range_count;
+  ai_quic_packet_range_t received_ranges[AI_QUIC_MAX_TRACKED_ACK_RANGES];
 } ai_quic_packet_number_space_t;
 
 #endif

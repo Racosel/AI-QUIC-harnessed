@@ -1,4 +1,4 @@
-.PHONY: help build test-unit test-integration ai-quic-interop-image quic-demo-server quic-demo-client interop-ai-server interop-ai-client interop-handshake-server interop-handshake-client interop-run interop-handshake-smoke interop-versionnegotiation interop-logs clean clean-test-logs
+.PHONY: help build test-unit test-integration ai-quic-interop-image quic-demo-server quic-demo-client interop-ai-server interop-ai-client interop-handshake-server interop-handshake-client interop-transfer-server interop-transfer-client interop-run interop-handshake-smoke interop-versionnegotiation interop-logs clean clean-test-logs
 
 DEFAULT_SERVER := ai-quic
 DEFAULT_CLIENT := ai-quic
@@ -28,6 +28,8 @@ help:
 	@echo "  make interop-ai-client                   # xquic server vs ai-quic client"
 	@echo "  make interop-handshake-server            # alias of interop-ai-server for handshake stage"
 	@echo "  make interop-handshake-client            # alias of interop-ai-client for handshake stage"
+	@echo "  make interop-transfer-server             # ai-quic server vs xquic client for transfer"
+	@echo "  make interop-transfer-client             # xquic server vs ai-quic client for transfer"
 	@echo "  make interop-handshake-smoke             # local ai-quic <-> ai-quic handshake smoke test"
 	@echo "  make interop-versionnegotiation          # local version negotiation smoke test"
 	@echo "  make interop-run SERVER=x CLIENT=y TESTCASE=z [INTEROP_DEBUG=1]"
@@ -62,6 +64,12 @@ interop-ai-client: ai-quic-interop-image
 interop-handshake-server: interop-ai-server
 
 interop-handshake-client: interop-ai-client
+
+interop-transfer-server: ai-quic-interop-image
+	@$(MAKE) interop-run SERVER=ai-quic CLIENT=xquic TESTCASE=transfer INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+interop-transfer-client: ai-quic-interop-image
+	@$(MAKE) interop-run SERVER=xquic CLIENT=ai-quic TESTCASE=transfer INTEROP_DEBUG=$(INTEROP_DEBUG)
 
 interop-handshake-smoke: build
 	@/bin/bash "$(AI_QUIC_DIR)/tests/interop/test_local_handshake.sh"

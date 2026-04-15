@@ -14,8 +14,9 @@
 
 #### 模块映射规则
 
-- `Dispatcher/包头/TLS/基础加解密` -> 步骤00-03
-- `Stream/Flow Control/基础调度` -> 步骤04
+- `Dispatcher/包头/握手基础` -> 步骤00-01
+- `Stream/Flow Control/基础调度` -> 步骤02
+- `Version Negotiation/版本兼容/TLS 套件约束` -> 步骤03-04
 - `Retry/Token/地址验证/反放大` -> 步骤05
 - `ACK/Loss/PTO/Congestion` -> 步骤06
 - `Ticket/Resumption/0-RTT/Key Update` -> 步骤07-09
@@ -77,21 +78,24 @@
 - **影子回归建议**：从本步开始尽早引入 `handshakecorruption` 的定向排障能力。
 - **前置依赖**：步骤00。
 
-### 步骤02：密码套件约束能力
+### 步骤02：流控与多流传输基础
 
-- **目标测试例(TESTCASE)**：`TESTCASE="chacha20"`
-- **阶段目标**：验证 TLS 套件策略可以独立变化，而 transport 状态机保持不变。
+- **目标测试例(TESTCASE)**：`TESTCASE="transfer"`
+- **阶段目标**：建立 `stream manager + flow control + send scheduler` 的最小稳定组合，支撑 1MB 级数据传输。
 - **阶段实现建议**：
-  - 把密码套件约束集中在 TLS 适配层或等价配置层，不要让 `connection/recovery/stream` 感知“当前是 AES 还是 ChaCha20”。
-  - 用表驱动或独立 ops 描述 AEAD、header protection、HKDF 派生参数，避免散落的 `if (chacha20)`。
-  - Header protection 与 payload AEAD 必须是两个独立对象。
+  - 先做完整的单流发送/接收状态机，再做 stream manager 的 lazy materialization、方向检查、流数限制与流集合管理。
+  - 连接级与流级流控要独立建模；接收缓冲按 offset 区间组织，不能假设顺序到达。
+  - `MAX_DATA` / `MAX_STREAM_DATA` 应由“应用已消费”驱动，而不是“收到数据立即放大窗口”。
+  - 调度策略先追求公平和可解释：控制帧优先于数据帧，流按轮询或简单带权轮询发送，单个流不能长期独占 cwnd。
 - **注意事项**：
-  - Initial secret 由 QUIC version salt 决定，不随 TLS 协商套件变化。
-  - tag 长度、nonce 长度、header protection 采样规则必须来自当前 cipher 配置，不能写死。
-  - 本阶段不应引入新的 transport 行为，只改 TLS 配置和兼容性。
+  - final size 违规必须按协议错误处理。
+  - `RESET_STREAM`、`STOP_SENDING` 不能打乱流控状态。
+  - 不建议本阶段引入智能接收窗口扩展，先使用固定窗口和清晰接口。
 - **验收重点**：
-  - 强制 ChaCha20 后握手与下载仍成功。
-  - 单测覆盖 AEAD 加解密、header protection/unprotection、错误 key/nonce 的失败路径。
+  - 约 1MB 传输期间窗口可稳定增长，传输完成且无死锁。
+  - 多流并发时无饿死，ACK 与流控不会互相卡死。
+  - 覆盖乱序接收、FIN/final size、`RESET_STREAM`、流数超限、窗口更新时机。
+- **影子回归建议**：步骤02之后尽早挂上 `ipv6`；`multiplexing` 可作为步骤02到步骤12之间的桥梁测试。
 - **前置依赖**：步骤01。
 
 ### 步骤03：QUIC v2 协商与兼容
@@ -111,24 +115,21 @@
   - 未知版本仍走无状态 VN 路径。
 - **前置依赖**：步骤02。
 
-### 步骤04：流控与多流传输基础
+### 步骤04：密码套件约束能力
 
-- **目标测试例(TESTCASE)**：`TESTCASE="transfer"`
-- **阶段目标**：建立 `stream manager + flow control + send scheduler` 的最小稳定组合，支撑 1MB 级数据传输。
+- **目标测试例(TESTCASE)**：`TESTCASE="chacha20"`
+- **阶段目标**：验证 TLS 套件策略可以独立变化，而 transport 状态机保持不变。
 - **阶段实现建议**：
-  - 先做完整的单流发送/接收状态机，再做 stream manager 的 lazy materialization、方向检查、流数限制与流集合管理。
-  - 连接级与流级流控要独立建模；接收缓冲按 offset 区间组织，不能假设顺序到达。
-  - `MAX_DATA` / `MAX_STREAM_DATA` 应由“应用已消费”驱动，而不是“收到数据立即放大窗口”。
-  - 调度策略先追求公平和可解释：控制帧优先于数据帧，流按轮询或简单带权轮询发送，单个流不能长期独占 cwnd。
+  - 把密码套件约束集中在 TLS 适配层或等价配置层，不要让 `connection/recovery/stream` 感知“当前是 AES 还是 ChaCha20”。
+  - 用表驱动或独立 ops 描述 AEAD、header protection、HKDF 派生参数，避免散落的 `if (chacha20)`。
+  - Header protection 与 payload AEAD 必须是两个独立对象。
 - **注意事项**：
-  - final size 违规必须按协议错误处理。
-  - `RESET_STREAM`、`STOP_SENDING` 不能打乱流控状态。
-  - 不建议本阶段引入智能接收窗口扩展，先使用固定窗口和清晰接口。
+  - Initial secret 由 QUIC version salt 决定，不随 TLS 协商套件变化。
+  - tag 长度、nonce 长度、header protection 采样规则必须来自当前 cipher 配置，不能写死。
+  - 本阶段不应引入新的 transport 行为，只改 TLS 配置和兼容性。
 - **验收重点**：
-  - 约 1MB 传输期间窗口可稳定增长，传输完成且无死锁。
-  - 多流并发时无饿死，ACK 与流控不会互相卡死。
-  - 覆盖乱序接收、FIN/final size、`RESET_STREAM`、流数超限、窗口更新时机。
-- **影子回归建议**：步骤04之后尽早挂上 `ipv6`；`multiplexing` 可作为步骤04到步骤12之间的桥梁测试。
+  - 强制 ChaCha20 后握手与下载仍成功。
+  - 单测覆盖 AEAD 加解密、header protection/unprotection、错误 key/nonce 的失败路径。
 - **前置依赖**：步骤03。
 
 ### 步骤05：Token 与地址验证链路
@@ -303,8 +304,8 @@
 - `handshakecorruption`、`amplificationlimit`：从步骤01/05 开始跟进。
 - `handshakeloss`、`longrtt`、`blackhole`：挂在步骤06/07。
 - `transferloss`、`transfercorruption`、`goodput`、`crosstraffic`、`ecn`：建议从步骤08 之后持续跟进。
-- `ipv6`：步骤04 之后尽早加入，避免后期把地址族兼容性和迁移问题叠在一起。
-- `multiplexing`：可作为步骤04 与步骤12 之间的桥梁测试，用于提前发现“多流调度没问题，但 H3 控制流优先级不对”的问题。
+- `ipv6`：步骤02 之后尽早加入，避免后期把地址族兼容性和迁移问题叠在一起。
+- `multiplexing`：可作为步骤02 与步骤12 之间的桥梁测试，用于提前发现“多流调度没问题，但 H3 控制流优先级不对”的问题。
 
 ### 附录：开发执行要求
 

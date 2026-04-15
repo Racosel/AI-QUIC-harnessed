@@ -166,17 +166,18 @@ void ai_quic_endpoint_config_init(ai_quic_endpoint_config_t *config,
   config->alpn = "hq-interop";
 }
 
-static void ai_quic_endpoint_push(ai_quic_endpoint_impl_t *endpoint,
-                                  const ai_quic_pending_datagram_t *datagram) {
+static ai_quic_result_t ai_quic_endpoint_push(ai_quic_endpoint_impl_t *endpoint,
+                                              const ai_quic_pending_datagram_t *datagram) {
   size_t index;
 
   if (endpoint == NULL || datagram == NULL ||
       endpoint->pending_len >= AI_QUIC_MAX_PENDING_DATAGRAMS) {
-    return;
+    return AI_QUIC_ERROR;
   }
   index = (endpoint->pending_head + endpoint->pending_len) % AI_QUIC_MAX_PENDING_DATAGRAMS;
   endpoint->pending[index] = *datagram;
   endpoint->pending_len += 1u;
+  return AI_QUIC_OK;
 }
 
 static int ai_quic_is_all_zero(const uint8_t *buffer, size_t len) {
@@ -239,7 +240,8 @@ void ai_quic_endpoint_destroy(ai_quic_endpoint_t *endpoint) {
 
 static ai_quic_result_t ai_quic_endpoint_drain_conn(ai_quic_endpoint_impl_t *endpoint,
                                                     uint64_t now_ms) {
-  ai_quic_pending_datagram_t staged[AI_QUIC_MAX_PENDING_DATAGRAMS];
+  ai_quic_pending_datagram_t *staged;
+  size_t staged_capacity;
   size_t staged_len;
   size_t i;
 
@@ -247,23 +249,41 @@ static ai_quic_result_t ai_quic_endpoint_drain_conn(ai_quic_endpoint_impl_t *end
     return AI_QUIC_OK;
   }
 
+  staged_capacity = AI_QUIC_MAX_PENDING_DATAGRAMS;
+  staged = (ai_quic_pending_datagram_t *)calloc(staged_capacity, sizeof(*staged));
+  if (staged == NULL) {
+    endpoint->status = AI_QUIC_ERROR;
+    ai_quic_set_error(endpoint->error, sizeof(endpoint->error), "%s", "staged datagram alloc failed");
+    return AI_QUIC_ERROR;
+  }
+
   staged_len = 0u;
   if (ai_quic_conn_flush_pending(endpoint->conn,
                                  now_ms,
                                  staged,
                                  &staged_len,
-                                 AI_QUIC_ARRAY_LEN(staged),
+                                 staged_capacity,
                                  endpoint->config.www_root) != AI_QUIC_OK) {
     endpoint->status = AI_QUIC_ERROR;
     ai_quic_set_error(endpoint->error, sizeof(endpoint->error), "%s",
                       endpoint->conn->last_error);
+    free(staged);
     return AI_QUIC_ERROR;
   }
 
   for (i = 0; i < staged_len; ++i) {
-    ai_quic_endpoint_push(endpoint, &staged[i]);
+    if (ai_quic_endpoint_push(endpoint, &staged[i]) != AI_QUIC_OK) {
+      endpoint->status = AI_QUIC_ERROR;
+      ai_quic_set_error(endpoint->error,
+                        sizeof(endpoint->error),
+                        "pending datagram queue overflow capacity=%u",
+                        (unsigned)AI_QUIC_MAX_PENDING_DATAGRAMS);
+      free(staged);
+      return AI_QUIC_ERROR;
+    }
   }
 
+  free(staged);
   return AI_QUIC_OK;
 }
 
@@ -287,8 +307,18 @@ ai_quic_result_t ai_quic_endpoint_start_client(ai_quic_endpoint_t *endpoint,
                                   impl->qlog,
                                   impl->config.alpn,
                                   impl->config.keylog_path) != AI_QUIC_OK ||
-      ai_quic_conn_start_client(impl->conn, authority, request_path) !=
+      ai_quic_conn_start_client(impl->conn, authority, NULL) !=
           AI_QUIC_OK) {
+    impl->status = AI_QUIC_ERROR;
+    ai_quic_set_error(impl->error, sizeof(impl->error), "%s",
+                      impl->conn->last_error);
+    return AI_QUIC_ERROR;
+  }
+
+  if (request_path != NULL &&
+      ai_quic_conn_queue_request(impl->conn,
+                                 request_path,
+                                 impl->config.downloads_root) != AI_QUIC_OK) {
     impl->status = AI_QUIC_ERROR;
     ai_quic_set_error(impl->error, sizeof(impl->error), "%s",
                       impl->conn->last_error);
@@ -305,6 +335,24 @@ ai_quic_result_t ai_quic_endpoint_start_client(ai_quic_endpoint_t *endpoint,
   return ai_quic_endpoint_drain_conn(impl, ai_quic_now_ms());
 }
 
+ai_quic_result_t ai_quic_endpoint_queue_request(ai_quic_endpoint_t *endpoint,
+                                                const char *request_path) {
+  ai_quic_endpoint_impl_t *impl;
+
+  impl = (ai_quic_endpoint_impl_t *)endpoint;
+  if (impl == NULL || impl->conn == NULL || impl->config.role != AI_QUIC_ENDPOINT_ROLE_CLIENT) {
+    return AI_QUIC_ERROR;
+  }
+  if (ai_quic_conn_queue_request(impl->conn,
+                                 request_path,
+                                 impl->config.downloads_root) != AI_QUIC_OK) {
+    impl->status = AI_QUIC_ERROR;
+    ai_quic_set_error(impl->error, sizeof(impl->error), "%s", impl->conn->last_error);
+    return AI_QUIC_ERROR;
+  }
+  return AI_QUIC_OK;
+}
+
 ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                                    const uint8_t *datagram,
                                                    size_t datagram_len,
@@ -314,12 +362,21 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
   ai_quic_packet_t packet;
   size_t offset;
   size_t consumed;
-  ai_quic_pending_datagram_t staged[AI_QUIC_MAX_PENDING_DATAGRAMS];
+  ai_quic_pending_datagram_t *staged;
+  size_t staged_capacity;
   size_t staged_len;
   size_t i;
 
   impl = (ai_quic_endpoint_impl_t *)endpoint;
   if (impl == NULL || datagram == NULL || datagram_len == 0u) {
+    return AI_QUIC_ERROR;
+  }
+
+  staged_capacity = AI_QUIC_MAX_PENDING_DATAGRAMS;
+  staged = (ai_quic_pending_datagram_t *)calloc(staged_capacity, sizeof(*staged));
+  if (staged == NULL) {
+    impl->status = AI_QUIC_ERROR;
+    ai_quic_set_error(impl->error, sizeof(impl->error), "%s", "staged datagram alloc failed");
     return AI_QUIC_ERROR;
   }
 
@@ -341,6 +398,7 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                       datagram[0],
                       datagram,
                       datagram_len);
+    free(staged);
     return AI_QUIC_ERROR;
   }
 
@@ -353,6 +411,7 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                       datagram[0],
                       datagram,
                       datagram_len);
+    free(staged);
     return AI_QUIC_OK;
   }
 
@@ -365,11 +424,21 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                           &vn) != AI_QUIC_OK ||
         ai_quic_packet_encode(&vn, out.bytes, sizeof(out.bytes), &out.len) !=
             AI_QUIC_OK) {
+      free(staged);
       return AI_QUIC_ERROR;
     }
     vn.header.packet_length = out.len;
     ai_quic_qlog_packet(impl->qlog, now_ms, "packet_sent", &vn, out.bytes, out.len);
-    ai_quic_endpoint_push(impl, &out);
+    if (ai_quic_endpoint_push(impl, &out) != AI_QUIC_OK) {
+      impl->status = AI_QUIC_ERROR;
+      ai_quic_set_error(impl->error,
+                        sizeof(impl->error),
+                        "pending datagram queue overflow capacity=%u",
+                        (unsigned)AI_QUIC_MAX_PENDING_DATAGRAMS);
+      free(staged);
+      return AI_QUIC_ERROR;
+    }
+    free(staged);
     return AI_QUIC_OK;
   }
 
@@ -382,11 +451,13 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                     impl->config.alpn,
                                     impl->config.keylog_path) != AI_QUIC_OK) {
       impl->status = AI_QUIC_ERROR;
+      free(staged);
       return AI_QUIC_ERROR;
     }
   }
 
   if (impl->conn == NULL) {
+    free(staged);
     return AI_QUIC_ERROR;
   }
 
@@ -452,6 +523,7 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                           datagram + offset,
                           datagram_len - offset);
       }
+      free(staged);
       return AI_QUIC_ERROR;
     }
     ai_quic_qlog_packet(impl->qlog,
@@ -465,22 +537,37 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                now_ms,
                                staged,
                                &staged_len,
-                               AI_QUIC_ARRAY_LEN(staged),
+                               staged_capacity,
                                impl->config.www_root,
                                impl->config.downloads_root) != AI_QUIC_OK) {
       impl->status = AI_QUIC_ERROR;
       ai_quic_set_error(impl->error, sizeof(impl->error), "%s",
                         impl->conn->last_error);
+      free(staged);
       return AI_QUIC_ERROR;
     }
     offset += consumed;
   }
 
   for (i = 0; i < staged_len; ++i) {
-    ai_quic_endpoint_push(impl, &staged[i]);
+    if (ai_quic_endpoint_push(impl, &staged[i]) != AI_QUIC_OK) {
+      impl->status = AI_QUIC_ERROR;
+      ai_quic_set_error(impl->error,
+                        sizeof(impl->error),
+                        "pending datagram queue overflow capacity=%u",
+                        (unsigned)AI_QUIC_MAX_PENDING_DATAGRAMS);
+      free(staged);
+      return AI_QUIC_ERROR;
+    }
   }
 
-  return ai_quic_endpoint_drain_conn(impl, now_ms);
+  if (ai_quic_endpoint_drain_conn(impl, now_ms) != AI_QUIC_OK) {
+    free(staged);
+    return AI_QUIC_ERROR;
+  }
+
+  free(staged);
+  return AI_QUIC_OK;
 }
 
 ai_quic_result_t ai_quic_endpoint_on_timeout(ai_quic_endpoint_t *endpoint,

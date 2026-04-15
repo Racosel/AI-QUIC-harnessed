@@ -82,6 +82,52 @@ static void ai_quic_demo_format_preview_hex(const uint8_t *bytes,
   buffer[offset] = '\0';
 }
 
+static int ai_quic_demo_send_pending_server(
+    ai_quic_endpoint_t *endpoint,
+    ai_quic_demo_bound_socket_t *sockets,
+    size_t socket_count,
+    size_t socket_index,
+    const struct sockaddr *peer_addr,
+    socklen_t peer_addr_len,
+    const char *peer_text) {
+  uint8_t buffer[AI_QUIC_MAX_PACKET_SIZE];
+  size_t written;
+  char preview[64];
+
+  if (endpoint == NULL || sockets == NULL || socket_index >= socket_count || peer_addr == NULL) {
+    return -1;
+  }
+
+  while (ai_quic_endpoint_has_pending_datagrams(endpoint)) {
+    if (ai_quic_endpoint_pop_datagram(endpoint, buffer, sizeof(buffer), &written) != AI_QUIC_OK ||
+        sendto(sockets[socket_index].fd,
+               buffer,
+               written,
+               0,
+               peer_addr,
+               peer_addr_len) < 0) {
+      ai_quic_log_write(AI_QUIC_LOG_ERROR,
+                        "demo_server",
+                        "sendto failed on %s to %s errno=%d (%s)",
+                        sockets[socket_index].label,
+                        peer_text != NULL ? peer_text : "(unknown)",
+                        errno,
+                        strerror(errno));
+      return -1;
+    }
+    ai_quic_demo_format_preview_hex(buffer, written, preview, sizeof(preview));
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "demo_server",
+                      "sent datagram len=%zu on %s to %s preview=%s",
+                      written,
+                      sockets[socket_index].label,
+                      peer_text != NULL ? peer_text : "(unknown)",
+                      preview);
+  }
+
+  return 0;
+}
+
 static int ai_quic_demo_bind_one(ai_quic_demo_bound_socket_t *slot,
                                  const char *host,
                                  uint16_t port,
@@ -197,7 +243,6 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
   ai_quic_endpoint_config_t config;
   ai_quic_endpoint_t *endpoint;
   uint8_t buffer[AI_QUIC_MAX_PACKET_SIZE];
-  size_t written;
   ai_quic_demo_bound_socket_t sockets[2];
   size_t socket_count;
   size_t i;
@@ -210,6 +255,12 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
   int ready;
   char peer_text[128];
   char preview[64];
+  struct sockaddr_storage last_peer_addr;
+  socklen_t last_peer_addr_len;
+  char last_peer_text[128];
+  size_t last_socket_index;
+  int have_peer_addr;
+  struct timeval timeout;
 
   if (ai_quic_demo_build_endpoint_config(
           options, AI_QUIC_ENDPOINT_ROLE_SERVER, &config) != AI_QUIC_OK) {
@@ -237,6 +288,11 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
   for (i = 0; i < AI_QUIC_ARRAY_LEN(sockets); ++i) {
     sockets[i].fd = -1;
   }
+  memset(&last_peer_addr, 0, sizeof(last_peer_addr));
+  last_peer_addr_len = 0;
+  last_peer_text[0] = '\0';
+  last_socket_index = 0u;
+  have_peer_addr = 0;
 
   socket_count = ai_quic_demo_bind_server_sockets(options, sockets, AI_QUIC_ARRAY_LEN(sockets));
   if (socket_count == 0u) {
@@ -259,7 +315,9 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
       }
     }
 
-    ready = select(max_fd + 1, &readfds, NULL, NULL, NULL);
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 20000;
+    ready = select(max_fd + 1, &readfds, NULL, NULL, &timeout);
     if (ready < 0) {
       if (errno == EINTR) {
         continue;
@@ -270,6 +328,26 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
                         errno,
                         strerror(errno));
       break;
+    }
+    if (ready == 0) {
+      if (ai_quic_endpoint_on_timeout(endpoint, ai_quic_now_ms()) != AI_QUIC_OK) {
+        ai_quic_log_write(AI_QUIC_LOG_ERROR,
+                          "demo_server",
+                          "endpoint timeout failed: %s",
+                          ai_quic_endpoint_error(endpoint));
+        goto cleanup_error;
+      }
+      if (have_peer_addr &&
+          ai_quic_demo_send_pending_server(endpoint,
+                                           sockets,
+                                           socket_count,
+                                           last_socket_index,
+                                           (const struct sockaddr *)&last_peer_addr,
+                                           last_peer_addr_len,
+                                           last_peer_text) != 0) {
+        goto cleanup_error;
+      }
+      continue;
     }
 
     for (i = 0; i < socket_count; ++i) {
@@ -298,6 +376,11 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
                                    peer_addr_len,
                                    peer_text,
                                    sizeof(peer_text));
+      memcpy(&last_peer_addr, &peer_addr, sizeof(peer_addr));
+      last_peer_addr_len = peer_addr_len;
+      snprintf(last_peer_text, sizeof(last_peer_text), "%s", peer_text);
+      last_socket_index = i;
+      have_peer_addr = 1;
       ai_quic_demo_format_preview_hex(buffer, (size_t)received, preview, sizeof(preview));
       ai_quic_log_write(AI_QUIC_LOG_INFO,
                         "demo_server",
@@ -318,32 +401,14 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
         goto cleanup_error;
       }
 
-      while (ai_quic_endpoint_has_pending_datagrams(endpoint)) {
-        if (ai_quic_endpoint_pop_datagram(endpoint, buffer, sizeof(buffer), &written) !=
-                AI_QUIC_OK ||
-            sendto(sockets[i].fd,
-                   buffer,
-                   written,
-                   0,
-                   (struct sockaddr *)&peer_addr,
-                   peer_addr_len) < 0) {
-          ai_quic_log_write(AI_QUIC_LOG_ERROR,
-                            "demo_server",
-                            "sendto failed on %s to %s errno=%d (%s)",
-                            sockets[i].label,
-                            peer_text,
-                            errno,
-                            strerror(errno));
-          goto cleanup_error;
-        }
-        ai_quic_demo_format_preview_hex(buffer, written, preview, sizeof(preview));
-        ai_quic_log_write(AI_QUIC_LOG_INFO,
-                          "demo_server",
-                          "sent datagram len=%zu on %s to %s preview=%s",
-                          written,
-                          sockets[i].label,
-                          peer_text,
-                          preview);
+      if (ai_quic_demo_send_pending_server(endpoint,
+                                           sockets,
+                                           socket_count,
+                                           i,
+                                           (const struct sockaddr *)&peer_addr,
+                                           peer_addr_len,
+                                           peer_text) != 0) {
+        goto cleanup_error;
       }
 
       if (ai_quic_endpoint_connection_info(endpoint, &info) == AI_QUIC_OK &&

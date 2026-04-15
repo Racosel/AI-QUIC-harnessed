@@ -41,6 +41,8 @@ void ai_quic_endpoint_destroy(ai_quic_endpoint_t *endpoint);
 ai_quic_result_t ai_quic_endpoint_start_client(ai_quic_endpoint_t *endpoint,
                                                const char *authority,
                                                const char *request_path);
+ai_quic_result_t ai_quic_endpoint_queue_request(ai_quic_endpoint_t *endpoint,
+                                                const char *request_path);
 ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                                    const uint8_t *datagram,
                                                    size_t datagram_len,

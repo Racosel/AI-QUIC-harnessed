@@ -34,6 +34,8 @@ typedef struct ai_quic_conn_info {
   int address_validated;
   uint64_t bytes_received;
   uint64_t bytes_sent;
+  size_t total_request_streams;
+  size_t completed_request_streams;
 } ai_quic_conn_info_t;
 
 ai_quic_conn_t *ai_quic_conn_create(ai_quic_version_t version, int is_server);

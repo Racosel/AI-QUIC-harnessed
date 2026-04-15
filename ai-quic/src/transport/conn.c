@@ -19,7 +19,8 @@ ai_quic_conn_t *ai_quic_conn_create(ai_quic_version_t version, int is_server) {
   conn->state = AI_QUIC_CONN_STATE_PRE_VALIDATION;
   ai_quic_transport_params_init(&conn->local_transport_params);
   ai_quic_transport_params_init(&conn->peer_transport_params);
-  ai_quic_stream_reset(&conn->stream, AI_QUIC_HTTP09_STREAM_ID);
+  ai_quic_stream_manager_init(&conn->streams);
+  ai_quic_flow_controller_init(&conn->conn_flow, AI_QUIC_INITIAL_MAX_DATA);
   for (i = 0; i < AI_QUIC_PN_SPACE_COUNT; ++i) {
     ai_quic_pn_space_init(&conn->packet_spaces[i], (ai_quic_packet_number_space_id_t)i);
   }
@@ -34,6 +35,7 @@ void ai_quic_conn_destroy(ai_quic_conn_t *conn) {
     return;
   }
   ai_quic_tls_session_destroy(impl->tls_session);
+  ai_quic_stream_manager_cleanup(&impl->streams);
   free(impl);
 }
 
@@ -121,5 +123,7 @@ ai_quic_result_t ai_quic_conn_get_info(const ai_quic_conn_t *conn,
   info->address_validated = impl->address_validated;
   info->bytes_received = impl->bytes_received;
   info->bytes_sent = impl->bytes_sent;
+  info->total_request_streams = impl->total_request_streams;
+  info->completed_request_streams = impl->completed_request_streams;
   return AI_QUIC_OK;
 }

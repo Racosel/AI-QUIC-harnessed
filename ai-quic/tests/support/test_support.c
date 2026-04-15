@@ -17,25 +17,87 @@ int ai_quic_fake_link_init(ai_quic_fake_link_t *link,
   return 0;
 }
 
-static int ai_quic_fake_link_drain(ai_quic_endpoint_t *from,
-                                   ai_quic_endpoint_t *to,
-                                   uint64_t now_ms) {
+static int ai_quic_fake_link_step(ai_quic_endpoint_t *from,
+                                  ai_quic_endpoint_t *to,
+                                  uint64_t now_ms) {
+  ai_quic_endpoint_impl_t *from_impl;
+  ai_quic_endpoint_impl_t *to_impl;
   uint8_t buffer[AI_QUIC_MAX_PACKET_SIZE];
   size_t written;
 
-  while (ai_quic_endpoint_has_pending_datagrams(from)) {
-    if (ai_quic_endpoint_pop_datagram(from, buffer, sizeof(buffer), &written) !=
-            AI_QUIC_OK ||
-        ai_quic_endpoint_receive_datagram(to, buffer, written, now_ms) !=
-            AI_QUIC_OK) {
-      fprintf(stderr,
-              "fake_link_drain failed: from=%s to=%s\n",
-              ai_quic_endpoint_error(from),
-              ai_quic_endpoint_error(to));
-      return 1;
-    }
+  from_impl = (ai_quic_endpoint_impl_t *)from;
+  to_impl = (ai_quic_endpoint_impl_t *)to;
+  if (!ai_quic_endpoint_has_pending_datagrams(from)) {
+    return 0;
+  }
+
+  if (ai_quic_endpoint_pop_datagram(from, buffer, sizeof(buffer), &written) !=
+          AI_QUIC_OK ||
+      ai_quic_endpoint_receive_datagram(to, buffer, written, now_ms) != AI_QUIC_OK) {
+    fprintf(stderr,
+            "fake_link_step failed: from=%s to=%s from_pending=%zu to_pending=%zu written=%zu\n",
+            ai_quic_endpoint_error(from),
+            ai_quic_endpoint_error(to),
+            from_impl != NULL ? from_impl->pending_len : 0u,
+            to_impl != NULL ? to_impl->pending_len : 0u,
+            written);
+    return 1;
   }
   return 0;
+}
+
+static void ai_quic_dump_conn_state(const char *label, ai_quic_endpoint_t *endpoint) {
+  ai_quic_endpoint_impl_t *impl;
+  size_t i;
+
+  impl = (ai_quic_endpoint_impl_t *)endpoint;
+  if (impl == NULL || impl->conn == NULL) {
+    return;
+  }
+
+  fprintf(stderr,
+          "%s conn_flow: recv_limit=%llu recv_consumed=%llu highest_received=%llu send_limit=%llu update_pending=%d blocked_pending=%d total_requests=%zu completed=%zu\n",
+          label,
+          (unsigned long long)impl->conn->conn_flow.recv_limit,
+          (unsigned long long)impl->conn->conn_flow.recv_consumed,
+          (unsigned long long)impl->conn->conn_flow.highest_received,
+          (unsigned long long)impl->conn->conn_flow.send_limit,
+          impl->conn->conn_flow.update_pending,
+          impl->conn->conn_flow.blocked_pending,
+          impl->conn->total_request_streams,
+          impl->conn->completed_request_streams);
+
+  for (i = 0; i < AI_QUIC_ARRAY_LEN(impl->conn->streams.streams); ++i) {
+    const ai_quic_stream_state_t *stream = &impl->conn->streams.streams[i];
+    if (!stream->in_use) {
+      continue;
+    }
+    fprintf(stderr,
+            "%s stream[%zu]: id=%llu local=%d send=%llu/%zu recv=%llu highest_recv=%llu consumed=%llu written=%llu final_known=%d final=%llu recv_fin=%d send_fin_req=%d send_fin_sent=%d req_parsed=%d resp_prepared=%d resp_finished=%d download_finished=%d stream_send_limit=%llu stream_recv_limit=%llu update_pending=%d blocked_pending=%d\n",
+            label,
+            i,
+            (unsigned long long)stream->stream_id,
+            stream->is_local,
+            (unsigned long long)stream->send_offset,
+            stream->send_data_len,
+            (unsigned long long)stream->recv_contiguous_end,
+            (unsigned long long)stream->flow.highest_received,
+            (unsigned long long)stream->app_consumed,
+            (unsigned long long)stream->file_written_offset,
+            stream->final_size_known,
+            (unsigned long long)stream->final_size,
+            stream->recv_fin,
+            stream->send_fin_requested,
+            stream->send_fin_sent,
+            stream->request_parsed,
+            stream->response_prepared,
+            stream->response_finished,
+            stream->download_finished,
+            (unsigned long long)stream->flow.send_limit,
+            (unsigned long long)stream->flow.recv_limit,
+            stream->flow.update_pending,
+            stream->flow.blocked_pending);
+  }
 }
 
 int ai_quic_fake_link_pump(ai_quic_fake_link_t *link) {
@@ -47,13 +109,40 @@ int ai_quic_fake_link_pump(ai_quic_fake_link_t *link) {
     return 1;
   }
 
-  for (rounds = 0; rounds < 64u; ++rounds) {
-    if (ai_quic_fake_link_drain(link->client, link->server, link->now_ms++) != 0 ||
-        ai_quic_fake_link_drain(link->server, link->client, link->now_ms++) != 0) {
+  for (rounds = 0; rounds < 32768u; ++rounds) {
+    ai_quic_endpoint_impl_t *client_impl = (ai_quic_endpoint_impl_t *)link->client;
+    ai_quic_endpoint_impl_t *server_impl = (ai_quic_endpoint_impl_t *)link->server;
+    size_t client_pending = client_impl != NULL ? client_impl->pending_len : 0u;
+    size_t server_pending = server_impl != NULL ? server_impl->pending_len : 0u;
+    ai_quic_endpoint_t *from;
+    ai_quic_endpoint_t *to;
+
+    if (client_pending > 512u || server_pending > 512u) {
+      if (client_pending > server_pending) {
+        from = link->client;
+        to = link->server;
+      } else {
+        from = link->server;
+        to = link->client;
+      }
+    } else if (server_pending > 0u) {
+      from = link->server;
+      to = link->client;
+    } else if (client_pending > 0u) {
+      from = link->client;
+      to = link->server;
+    } else {
+      from = link->client;
+      to = link->server;
+    }
+
+    if (ai_quic_fake_link_step(from, to, link->now_ms++) != 0) {
       return 1;
     }
     if (ai_quic_endpoint_connection_info(link->client, &client_info) == AI_QUIC_OK &&
         client_info.handshake_confirmed && client_info.state == AI_QUIC_CONN_STATE_ACTIVE &&
+        client_info.total_request_streams > 0u &&
+        client_info.completed_request_streams == client_info.total_request_streams &&
         !ai_quic_endpoint_has_pending_datagrams(link->client) &&
         !ai_quic_endpoint_has_pending_datagrams(link->server)) {
       return 0;
@@ -82,6 +171,8 @@ int ai_quic_fake_link_pump(ai_quic_fake_link_t *link) {
             (unsigned long long)server_info.bytes_received,
             (unsigned long long)server_info.bytes_sent);
   }
+  ai_quic_dump_conn_state("client", link->client);
+  ai_quic_dump_conn_state("server", link->server);
   return 1;
 }
 

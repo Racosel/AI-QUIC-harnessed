@@ -1953,44 +1953,7 @@ typedef ssize_t (*quic_pkt_filter_pt)(
 - 不要一开始就把 H3 接进去。
 - 先用裸传输 stream 或“下载一个小文件”的极简应用层。
 
-#### 步骤02：密码套件约束能力
-
-建议：
-
-- 不要把“密码套件选择”散落在多个地方。
-- 引擎级 TLS 配置和连接级 TLS 配置各自职责要明确：
-  - 全局允许哪些套件
-  - 单连接是否强制某套件
-
-验收重点：
-
-- 限制到 ChaCha20 时，握手仍完整走通
-- key derivation、header protection、AEAD tag 长度与所选 cipher 配套
-
-注意事项：
-
-- 这一步不应引入新的 transport 逻辑。
-- 只改 TLS 配置与握手兼容性。
-
-#### 步骤03：QUIC v2 协商与兼容
-
-建议：
-
-- 把“版本依赖项”集中管理：
-  - Initial salt
-  - transport parameters codepoint
-  - 包头细节差异
-- 不要把版本判断散落在 frame/stream/recovery 里。
-
-验收重点：
-
-- `tls_init(version, odcid)` 与 `tls_reset_initial(version, odcid)` 是否统一处理版本差异
-
-注意事项：
-
-- 如果 v2 暂不立即做，也建议把“版本表驱动”的基础框架先搭好。
-
-#### 步骤04：流控与多流传输基础
+#### 步骤02：流控与多流传输基础
 
 建议：
 
@@ -2011,6 +1974,43 @@ typedef ssize_t (*quic_pkt_filter_pt)(
 
 - 不建议一开始做“智能接收窗口扩展”，先固定窗口即可。
 - 但接口要允许后续加自适应窗口。
+
+#### 步骤03：QUIC v2 协商与兼容
+
+建议：
+
+- 把“版本依赖项”集中管理：
+  - Initial salt
+  - transport parameters codepoint
+  - 包头细节差异
+- 不要把版本判断散落在 frame/stream/recovery 里。
+
+验收重点：
+
+- `tls_init(version, odcid)` 与 `tls_reset_initial(version, odcid)` 是否统一处理版本差异
+
+注意事项：
+
+- 如果 v2 暂不立即做，也建议把“版本表驱动”的基础框架先搭好。
+
+#### 步骤04：密码套件约束能力
+
+建议：
+
+- 不要把“密码套件选择”散落在多个地方。
+- 引擎级 TLS 配置和连接级 TLS 配置各自职责要明确：
+  - 全局允许哪些套件
+  - 单连接是否强制某套件
+
+验收重点：
+
+- 限制到 ChaCha20 时，握手仍完整走通
+- key derivation、header protection、AEAD tag 长度与所选 cipher 配套
+
+注意事项：
+
+- 这一步不应引入新的 transport 逻辑。
+- 只改 TLS 配置与握手兼容性。
 
 #### 步骤05：Token 与地址验证链路
 

@@ -235,10 +235,17 @@ static ai_quic_result_t ai_quic_decode_frames_into(const uint8_t *payload,
                              payload_len - offset,
                              &consumed,
                              &frame) != AI_QUIC_OK) {
+      ai_quic_packet_decode_set_error("frame decode failed offset=%zu remaining=%zu first_byte=0x%02x",
+                                      offset,
+                                      payload_len - offset,
+                                      payload[offset]);
       return AI_QUIC_ERROR;
     }
     if (frame.type != AI_QUIC_FRAME_PADDING) {
       if (packet->frame_count >= AI_QUIC_MAX_FRAMES_PER_PACKET) {
+        ai_quic_packet_decode_set_error("frame count exceeded max=%u offset=%zu",
+                                        (unsigned)AI_QUIC_MAX_FRAMES_PER_PACKET,
+                                        offset);
         return AI_QUIC_ERROR;
       }
       packet->frames[packet->frame_count++] = frame;
@@ -1137,7 +1144,8 @@ static ai_quic_result_t ai_quic_packet_decode_long_protected(
   }
   space = ai_quic_conn_space_const(conn, ai_quic_packet_type_to_space(packet->header.type));
   packet->header.packet_number =
-      ai_quic_decode_packet_number_value(space != NULL ? space->largest_acked : UINT64_MAX,
+      ai_quic_decode_packet_number_value(
+          space != NULL ? space->largest_received_packet_number : UINT64_MAX,
                                          packet_number,
                                          (unsigned)(pn_len * 8u));
 
@@ -1172,7 +1180,8 @@ static ai_quic_result_t ai_quic_packet_decode_long_protected(
   packet->header.payload_length = plaintext_len;
   packet->header.packet_length = packet_len;
   if (ai_quic_decode_frames_into(plaintext, plaintext_len, packet) != AI_QUIC_OK) {
-    ai_quic_packet_decode_set_error("%s", "protected long header frame decode failed");
+    ai_quic_packet_decode_set_error("protected long header frame decode failed: %s",
+                                    g_ai_quic_packet_decode_error);
     return AI_QUIC_ERROR;
   }
 
@@ -1237,7 +1246,8 @@ static ai_quic_result_t ai_quic_packet_decode_short_protected(
   }
   space = ai_quic_conn_space_const(conn, AI_QUIC_PN_SPACE_APP_DATA);
   packet->header.packet_number =
-      ai_quic_decode_packet_number_value(space != NULL ? space->largest_acked : UINT64_MAX,
+      ai_quic_decode_packet_number_value(
+          space != NULL ? space->largest_received_packet_number : UINT64_MAX,
                                          truncated_pn,
                                          (unsigned)(pn_len * 8u));
 
@@ -1272,7 +1282,8 @@ static ai_quic_result_t ai_quic_packet_decode_short_protected(
   packet->header.payload_length = plaintext_len;
   packet->header.packet_length = buffer_len;
   if (ai_quic_decode_frames_into(plaintext, plaintext_len, packet) != AI_QUIC_OK) {
-    ai_quic_packet_decode_set_error("%s", "protected short header frame decode failed");
+    ai_quic_packet_decode_set_error("protected short header frame decode failed: %s",
+                                    g_ai_quic_packet_decode_error);
     return AI_QUIC_ERROR;
   }
 

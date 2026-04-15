@@ -15,7 +15,7 @@
 #include "ai_quic/tls.h"
 #include "ai_quic/transport_params.h"
 
-#define AI_QUIC_MAX_PENDING_DATAGRAMS 16u
+#define AI_QUIC_MAX_PENDING_DATAGRAMS 4096u
 #define AI_QUIC_MAX_DATAGRAM_SIZE AI_QUIC_MAX_PACKET_SIZE
 #define AI_QUIC_MAX_HTTP_BUFFER_LEN 8192u
 
@@ -38,24 +38,27 @@ typedef struct ai_quic_conn {
   ai_quic_transport_params_t local_transport_params;
   ai_quic_transport_params_t peer_transport_params;
   ai_quic_packet_number_space_t packet_spaces[AI_QUIC_PN_SPACE_COUNT];
-  ai_quic_stream_state_t stream;
+  ai_quic_stream_manager_t streams;
+  ai_quic_flow_controller_t conn_flow;
   ai_quic_tls_session_t *tls_session;
   ai_quic_qlog_writer_t *qlog;
   ai_quic_loss_state_t loss_state[AI_QUIC_PN_SPACE_COUNT];
   uint64_t bytes_received;
   uint64_t bytes_sent;
   uint64_t last_activity_ms;
+  uint64_t last_peer_max_data_ms;
+  uint64_t last_peer_stream_max_data_ms;
+  uint64_t last_peer_data_blocked_ms;
+  uint64_t app_flush_count;
   int handshake_completed;
   int can_send_1rtt;
   int handshake_confirmed;
   int address_validated;
   int peer_transport_params_validated;
   int should_send_handshake_done;
-  int request_received;
-  int response_finished;
   int saw_first_server_initial;
-  char requested_path[512];
-  char response_path[512];
+  size_t total_request_streams;
+  size_t completed_request_streams;
   char last_error[256];
 } ai_quic_conn_impl_t;
 
@@ -150,10 +153,35 @@ ai_quic_result_t ai_quic_transport_params_validate_server(
     const ai_quic_transport_params_t *params,
     const ai_quic_cid_t *peer_scid);
 
-void ai_quic_build_ack_frame(ai_quic_frame_t *frame, uint64_t largest_acked);
+void ai_quic_build_ack_frame(const ai_quic_packet_number_space_t *space,
+                             ai_quic_frame_t *frame);
+void ai_quic_flow_controller_init(ai_quic_flow_controller_t *controller,
+                                  uint64_t initial_window);
+void ai_quic_flow_controller_set_send_limit(ai_quic_flow_controller_t *controller,
+                                            uint64_t send_limit);
+void ai_quic_stream_manager_init(ai_quic_stream_manager_t *manager);
+void ai_quic_stream_manager_cleanup(ai_quic_stream_manager_t *manager);
+ai_quic_stream_state_t *ai_quic_stream_manager_find(ai_quic_stream_manager_t *manager,
+                                                    uint64_t stream_id);
+ai_quic_stream_state_t *ai_quic_stream_manager_open_local_bidi(
+    ai_quic_stream_manager_t *manager,
+    uint64_t send_limit,
+    uint64_t recv_limit);
+ai_quic_stream_state_t *ai_quic_stream_manager_get_or_create_remote_bidi(
+    ai_quic_stream_manager_t *manager,
+    uint64_t stream_id,
+    uint64_t send_limit,
+    uint64_t recv_limit);
+ai_quic_result_t ai_quic_stream_prepare_send(ai_quic_stream_state_t *stream,
+                                             const uint8_t *data,
+                                             size_t data_len,
+                                             int send_fin,
+                                             const char *request_path,
+                                             const char *output_path);
 ai_quic_result_t ai_quic_stream_on_receive(ai_quic_stream_state_t *stream,
                                            const ai_quic_stream_frame_t *frame);
-void ai_quic_stream_reset(ai_quic_stream_state_t *stream, uint64_t stream_id);
+ai_quic_result_t ai_quic_stream_consume(ai_quic_stream_state_t *stream,
+                                        uint64_t bytes);
 ai_quic_result_t ai_quic_crypto_stream_accept(ai_quic_packet_number_space_t *space,
                                               ai_quic_crypto_frame_t *frame);
 ai_quic_result_t ai_quic_parse_invariant_header(const uint8_t *datagram,
@@ -173,6 +201,9 @@ ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
 ai_quic_result_t ai_quic_conn_start_client(ai_quic_conn_impl_t *conn,
                                            const char *authority,
                                            const char *request_path);
+ai_quic_result_t ai_quic_conn_queue_request(ai_quic_conn_impl_t *conn,
+                                            const char *request_path,
+                                            const char *downloads_root);
 ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
                                         const ai_quic_packet_t *packet,
                                         uint64_t now_ms,

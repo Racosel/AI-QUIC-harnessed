@@ -4,7 +4,7 @@ set -eu
 ai_quic_testcase="${1:-}"
 
 case "${ai_quic_testcase}" in
-  handshake|versionnegotiation)
+  handshake|versionnegotiation|transfer)
     exit 0
     ;;
   *)
