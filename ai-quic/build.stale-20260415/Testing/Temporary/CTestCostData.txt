@@ -1,2 +1,0 @@
-ai_quic_smoke_test 1 0.00376301
----

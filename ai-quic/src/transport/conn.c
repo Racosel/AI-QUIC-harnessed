@@ -21,8 +21,10 @@ ai_quic_conn_t *ai_quic_conn_create(ai_quic_version_t version, int is_server) {
   ai_quic_transport_params_init(&conn->peer_transport_params);
   ai_quic_stream_manager_init(&conn->streams);
   ai_quic_flow_controller_init(&conn->conn_flow, AI_QUIC_INITIAL_MAX_DATA);
+  ai_quic_rtt_state_init(&conn->rtt_state);
   for (i = 0; i < AI_QUIC_PN_SPACE_COUNT; ++i) {
     ai_quic_pn_space_init(&conn->packet_spaces[i], (ai_quic_packet_number_space_id_t)i);
+    ai_quic_loss_state_init(&conn->loss_state[i]);
   }
   return conn;
 }

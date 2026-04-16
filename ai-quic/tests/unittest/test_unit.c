@@ -8,6 +8,76 @@
 #include "common_internal.h"
 #include "transport_internal.h"
 
+static void build_ping_packet(ai_quic_packet_t *packet,
+                              ai_quic_packet_type_t type,
+                              uint64_t packet_number,
+                              size_t packet_length) {
+  memset(packet, 0, sizeof(*packet));
+  packet->header.type = type;
+  packet->header.packet_number = packet_number;
+  packet->header.packet_length = packet_length;
+  packet->frames[0].type = AI_QUIC_FRAME_PING;
+  packet->frame_count = 1u;
+}
+
+static void build_stream_packet(ai_quic_packet_t *packet,
+                                uint64_t packet_number,
+                                uint64_t stream_id,
+                                uint64_t offset,
+                                size_t data_len,
+                                int fin) {
+  size_t i;
+
+  memset(packet, 0, sizeof(*packet));
+  packet->header.type = AI_QUIC_PACKET_TYPE_ONE_RTT;
+  packet->header.packet_number = packet_number;
+  packet->header.packet_length = data_len + 64u;
+  packet->frames[0].type = AI_QUIC_FRAME_STREAM;
+  packet->frames[0].payload.stream.stream_id = stream_id;
+  packet->frames[0].payload.stream.offset = offset;
+  packet->frames[0].payload.stream.data_len = data_len;
+  packet->frames[0].payload.stream.fin = fin;
+  for (i = 0u; i < data_len; ++i) {
+    packet->frames[0].payload.stream.data[i] = (uint8_t)('a' + ((offset + i) % 26u));
+  }
+  packet->frame_count = 1u;
+}
+
+static ai_quic_conn_impl_t *create_recovery_test_conn(ai_quic_stream_state_t **stream_out,
+                                                      size_t data_len,
+                                                      int send_fin) {
+  ai_quic_conn_impl_t *conn;
+  ai_quic_stream_state_t *stream;
+  uint8_t data[4096];
+  size_t i;
+
+  conn = (ai_quic_conn_impl_t *)ai_quic_conn_create(AI_QUIC_VERSION_V1, 1);
+  if (conn == NULL) {
+    return NULL;
+  }
+  conn->handshake_confirmed = 1;
+  conn->can_send_1rtt = 1;
+  conn->peer_transport_params.initial_max_data = 65536u;
+  conn->conn_flow.send_limit = 65536u;
+
+  stream = ai_quic_stream_manager_open_local_bidi(&conn->streams, 65536u, 65536u);
+  if (stream == NULL) {
+    ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+    return NULL;
+  }
+  for (i = 0u; i < data_len && i < sizeof(data); ++i) {
+    data[i] = (uint8_t)('a' + (i % 26u));
+  }
+  if (ai_quic_stream_prepare_send(stream, data, data_len, send_fin, NULL, NULL) != AI_QUIC_OK) {
+    ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+    return NULL;
+  }
+  if (stream_out != NULL) {
+    *stream_out = stream;
+  }
+  return conn;
+}
+
 static int test_version_negotiation_packet(void) {
   ai_quic_dispatcher_t *dispatcher;
   ai_quic_packet_t initial;
@@ -144,21 +214,28 @@ static int test_qlog_json_seq_survives_early_read(void) {
 
 static int test_pn_spaces_independent(void) {
   ai_quic_conn_t *conn;
+  ai_quic_packet_t packet;
 
   conn = ai_quic_conn_create(AI_QUIC_VERSION_V1, 0);
   AI_QUIC_ASSERT(conn != NULL);
-  ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
-                              AI_QUIC_PN_SPACE_INITIAL,
-                              1u,
-                              10u);
-  ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
-                              AI_QUIC_PN_SPACE_HANDSHAKE,
-                              2u,
-                              20u);
-  ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
-                              AI_QUIC_PN_SPACE_APP_DATA,
-                              3u,
-                              30u);
+  build_ping_packet(&packet, AI_QUIC_PACKET_TYPE_INITIAL, 1u, 120u);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
+                                             AI_QUIC_PN_SPACE_INITIAL,
+                                             &packet,
+                                             packet.header.packet_length,
+                                             10u) == AI_QUIC_OK);
+  build_ping_packet(&packet, AI_QUIC_PACKET_TYPE_HANDSHAKE, 2u, 120u);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
+                                             AI_QUIC_PN_SPACE_HANDSHAKE,
+                                             &packet,
+                                             packet.header.packet_length,
+                                             20u) == AI_QUIC_OK);
+  build_ping_packet(&packet, AI_QUIC_PACKET_TYPE_ONE_RTT, 3u, 120u);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent((ai_quic_conn_impl_t *)conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             packet.header.packet_length,
+                                             30u) == AI_QUIC_OK);
   AI_QUIC_ASSERT(ai_quic_conn_packet_number_space(conn, AI_QUIC_PN_SPACE_INITIAL)
                      ->pto_deadline_ms !=
                  ai_quic_conn_packet_number_space(conn, AI_QUIC_PN_SPACE_HANDSHAKE)
@@ -374,6 +451,243 @@ static int test_stream_flow_control_updates_on_consume(void) {
   return 0;
 }
 
+static int test_stream_flow_control_updates_on_receive(void) {
+  ai_quic_stream_manager_t manager;
+  ai_quic_stream_state_t *stream;
+  ai_quic_stream_frame_t frame;
+
+  ai_quic_stream_manager_init(&manager);
+  stream = ai_quic_stream_manager_open_local_bidi(&manager, 1024u, 65536u);
+  AI_QUIC_ASSERT(stream != NULL);
+
+  memset(&frame, 0, sizeof(frame));
+  frame.stream_id = stream->stream_id;
+  frame.offset = 65000u;
+  frame.data_len = 256u;
+  memcpy(frame.data, "early-window-refresh", sizeof("early-window-refresh") - 1u);
+
+  AI_QUIC_ASSERT(ai_quic_stream_on_receive(stream, &frame) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(stream->flow.update_pending);
+  AI_QUIC_ASSERT_EQ(stream->flow.highest_received, 65256u);
+  AI_QUIC_ASSERT_EQ(stream->flow.recv_limit,
+                    65256u + 65536u + AI_QUIC_STREAM_RECV_LIMIT_RESERVE);
+
+  ai_quic_stream_manager_cleanup(&manager);
+  return 0;
+}
+
+static int test_ack_gap_preserves_bytes_in_flight(void) {
+  ai_quic_conn_impl_t *conn;
+  ai_quic_stream_state_t *stream;
+  ai_quic_packet_t packet;
+  ai_quic_ack_frame_t ack;
+
+  conn = create_recovery_test_conn(&stream, 3600u, 0);
+  AI_QUIC_ASSERT(conn != NULL);
+  conn->rtt_state.latest_rtt_ms = 1000u;
+  conn->rtt_state.smoothed_rtt_ms = 1000u;
+  conn->rtt_state.rttvar_ms = 500u;
+  conn->rtt_state.min_rtt_ms = 1000u;
+
+  build_stream_packet(&packet, 1u, stream->stream_id, 0u, 1200u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             1250u,
+                                             10u) == AI_QUIC_OK);
+  build_stream_packet(&packet, 2u, stream->stream_id, 1200u, 1200u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             1250u,
+                                             20u) == AI_QUIC_OK);
+  build_stream_packet(&packet, 3u, stream->stream_id, 2400u, 1200u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             1250u,
+                                             30u) == AI_QUIC_OK);
+
+  memset(&ack, 0, sizeof(ack));
+  ack.largest_acked = 3u;
+  ack.first_ack_range = 0u;
+  ack.ack_range_count = 1u;
+  ack.ack_ranges[0].gap = 0u;
+  ack.ack_ranges[0].ack_range = 0u;
+  ai_quic_loss_on_ack_received(conn, AI_QUIC_PN_SPACE_APP_DATA, &ack, 100u, NULL);
+
+  AI_QUIC_ASSERT_EQ(conn->packet_spaces[AI_QUIC_PN_SPACE_APP_DATA].bytes_in_flight, 1250u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.count, 2u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].start, 0u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].end, 1200u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[1].start, 2400u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[1].end, 3600u);
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.count, 0u);
+
+  ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+  return 0;
+}
+
+static int test_packet_threshold_marks_only_eligible_loss(void) {
+  ai_quic_conn_impl_t *conn;
+  ai_quic_stream_state_t *stream;
+  ai_quic_packet_t packet;
+  ai_quic_ack_frame_t ack;
+
+  conn = create_recovery_test_conn(&stream, 400u, 0);
+  AI_QUIC_ASSERT(conn != NULL);
+  conn->rtt_state.latest_rtt_ms = 1000u;
+  conn->rtt_state.smoothed_rtt_ms = 1000u;
+  conn->rtt_state.rttvar_ms = 500u;
+  conn->rtt_state.min_rtt_ms = 1000u;
+
+  build_stream_packet(&packet, 1u, stream->stream_id, 0u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             10u) == AI_QUIC_OK);
+  build_stream_packet(&packet, 2u, stream->stream_id, 100u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             20u) == AI_QUIC_OK);
+  build_stream_packet(&packet, 3u, stream->stream_id, 200u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             30u) == AI_QUIC_OK);
+  build_stream_packet(&packet, 4u, stream->stream_id, 300u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             40u) == AI_QUIC_OK);
+
+  memset(&ack, 0, sizeof(ack));
+  ack.largest_acked = 4u;
+  ack.first_ack_range = 0u;
+  ai_quic_loss_on_ack_received(conn, AI_QUIC_PN_SPACE_APP_DATA, &ack, 50u, NULL);
+
+  AI_QUIC_ASSERT_EQ(conn->packet_spaces[AI_QUIC_PN_SPACE_APP_DATA].bytes_in_flight, 240u);
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.count, 1u);
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.ranges[0].start, 0u);
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.ranges[0].end, 100u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.count, 1u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].start, 300u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].end, 400u);
+
+  ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+  return 0;
+}
+
+static int test_lost_ranges_cleared_by_retransmit_ack(void) {
+  ai_quic_conn_impl_t *conn;
+  ai_quic_stream_state_t *stream;
+  ai_quic_packet_t packet;
+  ai_quic_ack_frame_t ack;
+
+  conn = create_recovery_test_conn(&stream, 100u, 0);
+  AI_QUIC_ASSERT(conn != NULL);
+  AI_QUIC_ASSERT(ai_quic_stream_mark_lost(stream, 0u, 100u, 0) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.count, 1u);
+
+  build_stream_packet(&packet, 2u, stream->stream_id, 0u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             20u) == AI_QUIC_OK);
+
+  memset(&ack, 0, sizeof(ack));
+  ack.largest_acked = 2u;
+  ack.first_ack_range = 0u;
+  ai_quic_loss_on_ack_received(conn, AI_QUIC_PN_SPACE_APP_DATA, &ack, 40u, NULL);
+
+  AI_QUIC_ASSERT_EQ(stream->lost_ranges.count, 0u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.count, 1u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].start, 0u);
+  AI_QUIC_ASSERT_EQ(stream->acked_ranges.ranges[0].end, 100u);
+
+  ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+  return 0;
+}
+
+static int test_lost_range_retransmit_prefers_earliest_gap(void) {
+  ai_quic_stream_manager_t manager;
+  ai_quic_stream_state_t *stream;
+  uint8_t data[64];
+  size_t i;
+  uint64_t offset;
+  size_t chunk_len;
+  int fin;
+
+  ai_quic_stream_manager_init(&manager);
+  stream = ai_quic_stream_manager_open_local_bidi(&manager, 8192u, 8192u);
+  AI_QUIC_ASSERT(stream != NULL);
+  for (i = 0u; i < sizeof(data); ++i) {
+    data[i] = (uint8_t)('a' + (i % 26u));
+  }
+  AI_QUIC_ASSERT(ai_quic_stream_prepare_send(stream,
+                                             data,
+                                             sizeof(data),
+                                             1,
+                                             NULL,
+                                             NULL) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_stream_mark_lost(stream, 10u, 18u, 0) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_stream_mark_lost(stream, 40u, 52u, 0) == AI_QUIC_OK);
+
+  AI_QUIC_ASSERT(ai_quic_stream_pop_lost_range(stream, 4u, &offset, &chunk_len, &fin));
+  AI_QUIC_ASSERT_EQ(offset, 10u);
+  AI_QUIC_ASSERT_EQ(chunk_len, 4u);
+  AI_QUIC_ASSERT(!fin);
+
+  AI_QUIC_ASSERT(ai_quic_stream_pop_lost_range(stream, 16u, &offset, &chunk_len, &fin));
+  AI_QUIC_ASSERT_EQ(offset, 14u);
+  AI_QUIC_ASSERT_EQ(chunk_len, 4u);
+  AI_QUIC_ASSERT(!fin);
+
+  AI_QUIC_ASSERT(ai_quic_stream_pop_lost_range(stream, 16u, &offset, &chunk_len, &fin));
+  AI_QUIC_ASSERT_EQ(offset, 40u);
+  AI_QUIC_ASSERT_EQ(chunk_len, 12u);
+  AI_QUIC_ASSERT(!fin);
+
+  ai_quic_stream_manager_cleanup(&manager);
+  return 0;
+}
+
+static int test_pto_backoff_resets_on_new_ack(void) {
+  ai_quic_conn_impl_t *conn;
+  ai_quic_stream_state_t *stream;
+  ai_quic_packet_t packet;
+  ai_quic_ack_frame_t ack;
+
+  conn = create_recovery_test_conn(&stream, 100u, 0);
+  AI_QUIC_ASSERT(conn != NULL);
+  build_stream_packet(&packet, 1u, stream->stream_id, 0u, 100u, 0);
+  AI_QUIC_ASSERT(ai_quic_loss_on_packet_sent(conn,
+                                             AI_QUIC_PN_SPACE_APP_DATA,
+                                             &packet,
+                                             120u,
+                                             10u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_loss_on_timeout(conn, AI_QUIC_PN_SPACE_APP_DATA, 1100u) == 1);
+  AI_QUIC_ASSERT_EQ(conn->loss_state[AI_QUIC_PN_SPACE_APP_DATA].pto_count, 1u);
+
+  memset(&ack, 0, sizeof(ack));
+  ack.largest_acked = 1u;
+  ack.first_ack_range = 0u;
+  ai_quic_loss_on_ack_received(conn, AI_QUIC_PN_SPACE_APP_DATA, &ack, 1200u, NULL);
+
+  AI_QUIC_ASSERT_EQ(conn->loss_state[AI_QUIC_PN_SPACE_APP_DATA].pto_count, 0u);
+  AI_QUIC_ASSERT_EQ(conn->packet_spaces[AI_QUIC_PN_SPACE_APP_DATA].bytes_in_flight, 0u);
+  AI_QUIC_ASSERT_EQ(conn->loss_state[AI_QUIC_PN_SPACE_APP_DATA].last_ack_ms, 1200u);
+
+  ai_quic_conn_destroy((ai_quic_conn_t *)conn);
+  return 0;
+}
+
 static int test_stream_before_1rtt_rejected(void) {
   ai_quic_conn_impl_t *conn;
   ai_quic_packet_t packet;
@@ -417,6 +731,12 @@ int main(void) {
   AI_QUIC_ASSERT(test_stream_reassembly_out_of_order() == 0);
   AI_QUIC_ASSERT(test_stream_overlap_duplicate_and_final_size() == 0);
   AI_QUIC_ASSERT(test_stream_flow_control_updates_on_consume() == 0);
+  AI_QUIC_ASSERT(test_stream_flow_control_updates_on_receive() == 0);
+  AI_QUIC_ASSERT(test_ack_gap_preserves_bytes_in_flight() == 0);
+  AI_QUIC_ASSERT(test_packet_threshold_marks_only_eligible_loss() == 0);
+  AI_QUIC_ASSERT(test_lost_ranges_cleared_by_retransmit_ack() == 0);
+  AI_QUIC_ASSERT(test_lost_range_retransmit_prefers_earliest_gap() == 0);
+  AI_QUIC_ASSERT(test_pto_backoff_resets_on_new_ack() == 0);
   AI_QUIC_ASSERT(test_stream_before_1rtt_rejected() == 0);
   AI_QUIC_ASSERT(test_ack_range_generation() == 0);
   puts("ai_quic_unit_test: ok");

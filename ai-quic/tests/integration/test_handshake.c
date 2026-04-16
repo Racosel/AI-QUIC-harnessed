@@ -92,7 +92,7 @@ static int test_multi_stream_transfer(void) {
   char server_root[] = "/tmp/ai_quic_transfer_serverXXXXXX";
   char client_root[] = "/tmp/ai_quic_transfer_clientXXXXXX";
   static const char *kNames[] = {"a.bin", "b.bin", "c.bin"};
-  static const size_t kSizes[] = {400000u, 380000u, 360000u};
+  static const size_t kSizes[] = {400000u, 380000u, 5u * 1024u * 1024u};
   uint8_t *payloads[3];
   size_t i;
   ai_quic_conn_info_t info;

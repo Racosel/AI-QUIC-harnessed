@@ -18,14 +18,58 @@
 #define AI_QUIC_MAX_PENDING_DATAGRAMS 4096u
 #define AI_QUIC_MAX_DATAGRAM_SIZE AI_QUIC_MAX_PACKET_SIZE
 #define AI_QUIC_MAX_HTTP_BUFFER_LEN 8192u
+#define AI_QUIC_MAX_TRACKED_SENT_PACKETS 2048u
+#define AI_QUIC_MAX_TRACKED_PACKET_STREAM_FRAMES 4u
 
 typedef struct ai_quic_pending_datagram {
   size_t len;
   uint8_t bytes[AI_QUIC_MAX_DATAGRAM_SIZE];
 } ai_quic_pending_datagram_t;
 
+typedef struct ai_quic_sent_stream_frame {
+  uint64_t stream_id;
+  uint64_t offset;
+  uint64_t end_offset;
+  int fin;
+} ai_quic_sent_stream_frame_t;
+
+typedef struct ai_quic_sent_packet {
+  int in_use;
+  ai_quic_packet_number_space_id_t space_id;
+  uint64_t packet_number;
+  uint64_t time_sent_ms;
+  size_t sent_bytes;
+  int ack_eliciting;
+  int in_flight;
+  size_t stream_frame_count;
+  ai_quic_sent_stream_frame_t stream_frames[AI_QUIC_MAX_TRACKED_PACKET_STREAM_FRAMES];
+} ai_quic_sent_packet_t;
+
+typedef enum ai_quic_loss_timer_mode {
+  AI_QUIC_LOSS_TIMER_MODE_NONE = 0,
+  AI_QUIC_LOSS_TIMER_MODE_LOSS = 1,
+  AI_QUIC_LOSS_TIMER_MODE_PTO = 2
+} ai_quic_loss_timer_mode_t;
+
+typedef struct ai_quic_rtt_state {
+  uint64_t latest_rtt_ms;
+  uint64_t smoothed_rtt_ms;
+  uint64_t rttvar_ms;
+  uint64_t min_rtt_ms;
+  uint64_t max_ack_delay_ms;
+} ai_quic_rtt_state_t;
+
 typedef struct ai_quic_loss_state {
   uint64_t latest_sent_packet;
+  uint64_t largest_acked_packet;
+  uint64_t last_ack_ms;
+  uint64_t last_pto_ms;
+  uint64_t loss_time_ms;
+  ai_quic_loss_timer_mode_t timer_mode;
+  uint32_t pto_count;
+  size_t sent_packet_count;
+  size_t next_sent_packet_index;
+  ai_quic_sent_packet_t sent_packets[AI_QUIC_MAX_TRACKED_SENT_PACKETS];
 } ai_quic_loss_state_t;
 
 typedef struct ai_quic_conn {
@@ -42,6 +86,7 @@ typedef struct ai_quic_conn {
   ai_quic_flow_controller_t conn_flow;
   ai_quic_tls_session_t *tls_session;
   ai_quic_qlog_writer_t *qlog;
+  ai_quic_rtt_state_t rtt_state;
   ai_quic_loss_state_t loss_state[AI_QUIC_PN_SPACE_COUNT];
   uint64_t bytes_received;
   uint64_t bytes_sent;
@@ -126,10 +171,24 @@ void ai_quic_pn_space_on_packet_received(ai_quic_packet_number_space_t *space,
 void ai_quic_pn_space_on_ack(ai_quic_packet_number_space_t *space,
                              uint64_t largest_acked);
 
-void ai_quic_loss_on_packet_sent(ai_quic_conn_impl_t *conn,
-                                 ai_quic_packet_number_space_id_t space_id,
-                                 uint64_t packet_number,
-                                 uint64_t now_ms);
+void ai_quic_rtt_state_init(ai_quic_rtt_state_t *rtt);
+void ai_quic_loss_state_init(ai_quic_loss_state_t *loss);
+ai_quic_result_t ai_quic_loss_on_packet_sent(ai_quic_conn_impl_t *conn,
+                                             ai_quic_packet_number_space_id_t space_id,
+                                             const ai_quic_packet_t *packet,
+                                             size_t sent_bytes,
+                                             uint64_t now_ms);
+void ai_quic_loss_on_ack_received(ai_quic_conn_impl_t *conn,
+                                  ai_quic_packet_number_space_id_t space_id,
+                                  const ai_quic_ack_frame_t *ack,
+                                  uint64_t now_ms,
+                                  int *ack_progress_out);
+void ai_quic_loss_update_timer(ai_quic_conn_impl_t *conn,
+                               ai_quic_packet_number_space_id_t space_id,
+                               uint64_t now_ms);
+int ai_quic_loss_on_timeout(ai_quic_conn_impl_t *conn,
+                            ai_quic_packet_number_space_id_t space_id,
+                            uint64_t now_ms);
 void ai_quic_loss_discard_space(ai_quic_conn_impl_t *conn,
                                 ai_quic_packet_number_space_id_t space_id);
 void ai_quic_timer_on_space_active(ai_quic_conn_impl_t *conn,
@@ -182,6 +241,26 @@ ai_quic_result_t ai_quic_stream_on_receive(ai_quic_stream_state_t *stream,
                                            const ai_quic_stream_frame_t *frame);
 ai_quic_result_t ai_quic_stream_consume(ai_quic_stream_state_t *stream,
                                         uint64_t bytes);
+ai_quic_result_t ai_quic_stream_range_insert(ai_quic_stream_range_set_t *set,
+                                             uint64_t start,
+                                             uint64_t end);
+void ai_quic_stream_range_remove(ai_quic_stream_range_set_t *set,
+                                 uint64_t start,
+                                 uint64_t end);
+int ai_quic_stream_has_lost_data(const ai_quic_stream_state_t *stream);
+ai_quic_result_t ai_quic_stream_mark_acked(ai_quic_stream_state_t *stream,
+                                           uint64_t start,
+                                           uint64_t end,
+                                           int fin);
+ai_quic_result_t ai_quic_stream_mark_lost(ai_quic_stream_state_t *stream,
+                                          uint64_t start,
+                                          uint64_t end,
+                                          int fin);
+int ai_quic_stream_pop_lost_range(ai_quic_stream_state_t *stream,
+                                  size_t max_len,
+                                  uint64_t *offset,
+                                  size_t *chunk_len,
+                                  int *fin);
 ai_quic_result_t ai_quic_crypto_stream_accept(ai_quic_packet_number_space_t *space,
                                               ai_quic_crypto_frame_t *frame);
 ai_quic_result_t ai_quic_parse_invariant_header(const uint8_t *datagram,

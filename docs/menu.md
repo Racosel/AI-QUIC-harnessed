@@ -13,6 +13,8 @@
 | 规划 QUIC 实现阶段与验收路径 | `docs/plans/plan-quic.md` + `docs/quic-interop-runner/quic-test-cases.md`                       | 先定阶段目标，再对齐测试用例映射。       |
 | 规划步骤01最小握手闭环       | `docs/plans/step01-handshake-doc-index.md` + `docs/quic-interop-runner/quic-test-cases.md`     | 先锁定握手边界，再补运行与协议约束。     |
 | 审查步骤01代码逻辑设计       | `docs/plans/step01-handshake-logic-design.md` + `docs/plans/repo-file-hierarchy.md`            | 编码前先锁定模块落点、状态机和阻断决策。 |
+| 规划步骤02流控与多流传输     | `docs/plans/step02-transfer-doc-index.md` + `docs/quic-interop-runner/quic-test-cases.md`      | 先锁定 transfer 语义，再补流控与调度约束。 |
+| 审查步骤02代码逻辑设计       | `docs/plans/step02-transfer-logic-design.md` + `docs/plans/repo-file-hierarchy.md`             | 编码前先锁定 stream/flow control/scheduler 设计。 |
 | 查阅 BoringSSL 接入资料      | `docs/boringssl/README.md` + `docs/boringssl/porting.md`                                        | 先看索引，再按迁移/构建/API 约束落地。   |
 | 规划仓库代码层级与模块落点   | `docs/plans/repo-file-hierarchy.md` + `docs/plans/plan-quic.md`                                 | 先确认目录边界，再决定代码与测试落点。   |
 | 互操作测试执行/排障          | `docs/quic-interop-runner/how-to-run.md` + `docs/quic-interop-runner/implement-requirements.md` | 先确认运行机制，再确认退出码约束。       |
@@ -34,6 +36,8 @@
 - 何时升级：
   - 若当前已明确推进步骤01，再读 `docs/plans/step01-handshake-doc-index.md`。
   - 若即将编码步骤01，先读 `docs/plans/step01-handshake-logic-design.md` 完成设计审查。
+  - 若当前已明确推进步骤02，再读 `docs/plans/step02-transfer-doc-index.md`。
+  - 若即将编码步骤02，先读 `docs/plans/step02-transfer-logic-design.md` 完成设计审查。
   - 若需要决定新代码、新测试或 interop 入口应落在哪个目录，再读 `docs/plans/repo-file-hierarchy.md`。
   - 若涉及团队流程/审计体系，再读 `docs/plans/plan-ai.md`。
 
@@ -84,6 +88,8 @@
 | `docs/plans/plan-quic.md`                               | P0               | QUIC 实现 8 阶段规划、模块划分、验收目标     | 需要制定实现计划或确认阶段目标       | 先读                          |
 | `docs/plans/step01-handshake-doc-index.md`              | P0               | 步骤01握手最小闭环的专项文档目录与阅读顺序   | 已进入步骤01规划、实现或排障          | 先读（步骤01专项）            |
 | `docs/plans/step01-handshake-logic-design.md`           | P0               | 步骤01路径1的代码逻辑设计与待拍板决策        | 准备进入步骤01编码前的设计审查        | 先读（编码前）                |
+| `docs/plans/step02-transfer-doc-index.md`               | P0               | 步骤02流控与多流传输的专项文档目录与阅读顺序 | 已进入步骤02规划、实现或排障          | 先读（步骤02专项）            |
+| `docs/plans/step02-transfer-logic-design.md`            | P0               | 步骤02的 stream/flow control/scheduler 行为设计 | 准备进入步骤02编码前的设计审查      | 先读（编码前）                |
 | `docs/plans/repo-file-hierarchy.md`                     | P0               | 当前仓库层级、建议中的 `ai-quic/` 目录与 `xquic` 模块映射 | 需要决定代码目录落点或建立实现骨架 | 先读（目录规划）              |
 | `docs/boringssl/README.md`                              | P0               | BoringSSL 导读索引与阅读顺序                 | 需要接入或排障 BoringSSL 相关问题     | 先读（BoringSSL）             |
 | `docs/boringssl/porting.md`                             | P1               | OpenSSL 到 BoringSSL 的迁移要点              | 迁移 TLS 代码或修 API 兼容问题        | 后读（在索引后）              |

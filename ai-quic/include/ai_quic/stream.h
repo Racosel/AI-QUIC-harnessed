@@ -8,6 +8,7 @@
 
 #define AI_QUIC_HTTP09_STREAM_ID 0u
 #define AI_QUIC_MAX_STREAMS 64u
+#define AI_QUIC_MAX_TRACKED_STREAM_RANGES 32u
 #define AI_QUIC_MAX_STREAM_REQUEST_PATH_LEN 512u
 #define AI_QUIC_MAX_STREAM_OUTPUT_PATH_LEN 1024u
 #define AI_QUIC_INITIAL_MAX_DATA (128u * 1024u)
@@ -26,6 +27,18 @@
  * flight when our latest MAX_STREAM_DATA update is still propagating.
  */
 #define AI_QUIC_STREAM_RECV_LIMIT_RESERVE (4u * AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN)
+#define AI_QUIC_CONN_RECV_LIMIT_RESERVE AI_QUIC_STREAM_RECV_LIMIT_RESERVE
+#define AI_QUIC_FLOW_LOG_PROGRESS_STEP (256u * 1024u)
+
+typedef struct ai_quic_stream_range {
+  uint64_t start;
+  uint64_t end;
+} ai_quic_stream_range_t;
+
+typedef struct ai_quic_stream_range_set {
+  size_t count;
+  ai_quic_stream_range_t ranges[AI_QUIC_MAX_TRACKED_STREAM_RANGES];
+} ai_quic_stream_range_set_t;
 
 typedef struct ai_quic_flow_controller {
   uint64_t initial_window;
@@ -56,9 +69,13 @@ typedef struct ai_quic_stream_state {
   uint8_t *send_data;
   size_t send_data_len;
   ai_quic_flow_controller_t flow;
+  ai_quic_stream_range_set_t acked_ranges;
+  ai_quic_stream_range_set_t lost_ranges;
   int recv_fin;
   int send_fin_requested;
   int send_fin_sent;
+  int send_fin_acked;
+  int lost_fin_pending;
   int resend_pending;
   int final_size_known;
   int request_parsed;

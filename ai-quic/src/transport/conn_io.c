@@ -14,9 +14,9 @@
   AI_QUIC_APP_DATA_RETRANSMIT_ONLY_PACKET_BUDGET
 #define AI_QUIC_APP_DATA_NEW_DATA_BUDGET 5u
 #define AI_QUIC_APP_DATA_THROTTLED_NEW_DATA_BUDGET 2u
+#define AI_QUIC_PTO_PROBE_PACKET_BUDGET 2u
 #define AI_QUIC_PEER_BLOCKED_COOLDOWN_MS 250u
 #define AI_QUIC_PEER_CREDIT_UPDATE_COOLDOWN_MS 250u
-#define AI_QUIC_PTO_RETRANSMIT_TAIL_CHUNKS 16u
 
 typedef struct ai_quic_app_flush_stats {
   size_t packets;
@@ -34,9 +34,13 @@ typedef enum ai_quic_stream_send_mode {
 
 static ai_quic_packet_number_space_id_t ai_quic_packet_type_to_space(
     ai_quic_packet_type_t type);
-static int ai_quic_packet_is_ack_eliciting(const ai_quic_packet_t *packet);
-static uint64_t ai_quic_stream_tail_resend_start(uint64_t resend_limit);
 static int ai_quic_conn_has_pending_new_stream_data(const ai_quic_conn_impl_t *conn);
+static int ai_quic_conn_has_pending_lost_stream_data(const ai_quic_conn_impl_t *conn);
+static uint64_t ai_quic_ack_frame_smallest_acked(const ai_quic_ack_frame_t *ack);
+static void ai_quic_conn_on_ack_frame(ai_quic_conn_impl_t *conn,
+                                      ai_quic_packet_number_space_id_t space_id,
+                                      const ai_quic_ack_frame_t *ack,
+                                      uint64_t now_ms);
 
 static const char *ai_quic_qlog_packet_type_name(ai_quic_packet_type_t type) {
   switch (type) {
@@ -79,6 +83,159 @@ static const char *ai_quic_tls_event_name(ai_quic_tls_event_type_t type) {
     case AI_QUIC_TLS_EVENT_NONE:
     default:
       return "none";
+  }
+}
+
+static int ai_quic_flow_crossed_progress_step(uint64_t before, uint64_t after) {
+  return before / AI_QUIC_FLOW_LOG_PROGRESS_STEP != after / AI_QUIC_FLOW_LOG_PROGRESS_STEP;
+}
+
+static uint64_t ai_quic_flow_update_margin(const ai_quic_flow_controller_t *controller) {
+  uint64_t margin;
+
+  if (controller == NULL) {
+    return 0u;
+  }
+
+  margin = controller->initial_window / 2u;
+  margin += AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN;
+  return margin;
+}
+
+static void ai_quic_conn_maybe_schedule_max_data(ai_quic_conn_impl_t *conn,
+                                                 uint64_t stream_id,
+                                                 uint64_t trigger_bytes,
+                                                 const char *reason) {
+  uint64_t recv_floor;
+  uint64_t update_margin;
+  uint64_t next_limit;
+  uint64_t prev_limit;
+
+  if (conn == NULL || conn->conn_flow.initial_window == 0u) {
+    return;
+  }
+
+  recv_floor = conn->conn_flow.recv_consumed > conn->conn_flow.highest_received
+                   ? conn->conn_flow.recv_consumed
+                   : conn->conn_flow.highest_received;
+  update_margin = ai_quic_flow_update_margin(&conn->conn_flow);
+  if (recv_floor + update_margin < conn->conn_flow.recv_limit) {
+    return;
+  }
+
+  next_limit = recv_floor + conn->conn_flow.initial_window;
+  next_limit += AI_QUIC_CONN_RECV_LIMIT_RESERVE;
+  if (next_limit <= conn->conn_flow.recv_limit) {
+    return;
+  }
+
+  prev_limit = conn->conn_flow.recv_limit;
+  conn->conn_flow.recv_limit = next_limit;
+  conn->conn_flow.update_pending = 1;
+  ai_quic_log_write(
+      AI_QUIC_LOG_INFO,
+      "conn_io",
+      "schedule MAX_DATA reason=%s old_limit=%llu new_limit=%llu recv_floor=%llu consumed=%llu highest_received=%llu stream=%llu bytes=%llu margin=%llu reserve=%u",
+      reason != NULL ? reason : "unknown",
+      (unsigned long long)prev_limit,
+      (unsigned long long)conn->conn_flow.recv_limit,
+      (unsigned long long)recv_floor,
+      (unsigned long long)conn->conn_flow.recv_consumed,
+      (unsigned long long)conn->conn_flow.highest_received,
+      (unsigned long long)stream_id,
+      (unsigned long long)trigger_bytes,
+      (unsigned long long)update_margin,
+      AI_QUIC_CONN_RECV_LIMIT_RESERVE);
+}
+
+static uint64_t ai_quic_ack_frame_smallest_acked(const ai_quic_ack_frame_t *ack) {
+  uint64_t range_end;
+  uint64_t range_start;
+  size_t i;
+
+  if (ack == NULL) {
+    return 0u;
+  }
+  if (ack->largest_acked < ack->first_ack_range) {
+    return 0u;
+  }
+
+  range_end = ack->largest_acked;
+  range_start = range_end - ack->first_ack_range;
+  for (i = 0; i < ack->ack_range_count; ++i) {
+    if (range_start < ack->ack_ranges[i].gap + 2u) {
+      return 0u;
+    }
+    range_end = range_start - ack->ack_ranges[i].gap - 2u;
+    if (range_end < ack->ack_ranges[i].ack_range) {
+      return 0u;
+    }
+    range_start = range_end - ack->ack_ranges[i].ack_range;
+  }
+  return range_start;
+}
+
+static void ai_quic_conn_on_ack_frame(ai_quic_conn_impl_t *conn,
+                                      ai_quic_packet_number_space_id_t space_id,
+                                      const ai_quic_ack_frame_t *ack,
+                                      uint64_t now_ms) {
+  ai_quic_packet_number_space_t *space;
+  uint64_t smallest_acked;
+  uint64_t prev_largest_acked;
+  uint32_t prev_pto_count;
+  int ack_progress;
+
+  if (conn == NULL || ack == NULL) {
+    return;
+  }
+
+  space = ai_quic_conn_space(conn, space_id);
+  if (space == NULL) {
+    return;
+  }
+  smallest_acked = ai_quic_ack_frame_smallest_acked(ack);
+  prev_largest_acked = space->largest_acked_by_peer;
+  prev_pto_count = conn->loss_state[space_id].pto_count;
+
+  ai_quic_log_write(
+      AI_QUIC_LOG_INFO,
+      "conn_io",
+      "recv ACK space=%s largest=%llu smallest=%llu first_range=%llu extra_ranges=%zu prev_largest_present=%d latest_sent=%llu bytes_in_flight=%llu pto_deadline=%llu pto_count=%u",
+      ai_quic_space_name(space_id),
+      (unsigned long long)ack->largest_acked,
+      (unsigned long long)smallest_acked,
+      (unsigned long long)ack->first_ack_range,
+      ack->ack_range_count,
+      prev_largest_acked != UINT64_MAX,
+      (unsigned long long)conn->loss_state[space_id].latest_sent_packet,
+      (unsigned long long)space->bytes_in_flight,
+      (unsigned long long)space->pto_deadline_ms,
+      conn->loss_state[space_id].pto_count);
+  if (prev_largest_acked != UINT64_MAX) {
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "conn_io",
+                      "recv ACK detail space=%s prev_largest=%llu new_largest=%llu ack_age=%llu srtt=%llu latest_rtt=%llu rttvar=%llu",
+                      ai_quic_space_name(space_id),
+                      (unsigned long long)prev_largest_acked,
+                      (unsigned long long)ack->largest_acked,
+                      (unsigned long long)(conn->loss_state[space_id].last_ack_ms == 0u
+                                               ? 0u
+                                               : now_ms - conn->loss_state[space_id].last_ack_ms),
+                      (unsigned long long)conn->rtt_state.smoothed_rtt_ms,
+                      (unsigned long long)conn->rtt_state.latest_rtt_ms,
+                      (unsigned long long)conn->rtt_state.rttvar_ms);
+  }
+
+  ai_quic_loss_on_ack_received(conn, space_id, ack, now_ms, &ack_progress);
+  if (ack_progress && conn->loss_state[space_id].last_ack_ms == now_ms) {
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "conn_io",
+                      "ack progress reset PTO state space=%s old_pto_count=%u latest_sent=%llu largest_acked=%llu bytes_in_flight=%llu",
+                      ai_quic_space_name(space_id),
+                      prev_pto_count,
+                      (unsigned long long)conn->loss_state[space_id].latest_sent_packet,
+                      (unsigned long long)ack->largest_acked,
+                      (unsigned long long)space->bytes_in_flight);
   }
 }
 
@@ -181,6 +338,8 @@ static ai_quic_result_t ai_quic_conn_push_datagram(
   size_t offset;
   size_t i;
   size_t written;
+  size_t packet_offset;
+  uint64_t send_time_ms;
 
   if (conn == NULL || packets == NULL || pending == NULL || pending_count == NULL ||
       *pending_count >= pending_capacity) {
@@ -206,13 +365,6 @@ static ai_quic_result_t ai_quic_conn_push_datagram(
     }
     packet_written = written;
     packets[i].header.packet_length = packet_written;
-    ai_quic_qlog_packet(conn,
-                        ai_quic_now_ms(),
-                        "packet_sent",
-                        &packets[i],
-                        packet_written,
-                        pending[*pending_count].bytes + offset,
-                        packet_written);
     offset += written;
   }
 
@@ -233,18 +385,34 @@ static ai_quic_result_t ai_quic_conn_push_datagram(
     offset = AI_QUIC_MIN_INITIAL_DATAGRAM_SIZE;
   }
 
+  send_time_ms = ai_quic_now_ms();
+  packet_offset = 0u;
+  for (i = 0; i < packet_count; ++i) {
+    if (ai_quic_loss_on_packet_sent(conn,
+                                    ai_quic_packet_type_to_space(packets[i].header.type),
+                                    &packets[i],
+                                    packets[i].header.packet_length,
+                                    send_time_ms) != AI_QUIC_OK) {
+      ai_quic_set_error(conn->last_error,
+                        sizeof(conn->last_error),
+                        "recovery tracking failed type=%d pn=%llu",
+                        (int)packets[i].header.type,
+                        (unsigned long long)packets[i].header.packet_number);
+      return AI_QUIC_ERROR;
+    }
+    ai_quic_qlog_packet(conn,
+                        send_time_ms,
+                        "packet_sent",
+                        &packets[i],
+                        packets[i].header.packet_length,
+                        pending[*pending_count].bytes + packet_offset,
+                        packets[i].header.packet_length);
+    packet_offset += packets[i].header.packet_length;
+  }
+
   pending[*pending_count].len = offset;
   *pending_count += 1u;
   conn->bytes_sent += offset;
-  for (i = 0; i < packet_count; ++i) {
-    if (!ai_quic_packet_is_ack_eliciting(&packets[i])) {
-      continue;
-    }
-    ai_quic_loss_on_packet_sent(conn,
-                                ai_quic_packet_type_to_space(packets[i].header.type),
-                                packets[i].header.packet_number,
-                                ai_quic_now_ms());
-  }
   return AI_QUIC_OK;
 }
 
@@ -259,32 +427,6 @@ static ai_quic_packet_number_space_id_t ai_quic_packet_type_to_space(
     default:
       return AI_QUIC_PN_SPACE_APP_DATA;
   }
-}
-
-static int ai_quic_packet_is_ack_eliciting(const ai_quic_packet_t *packet) {
-  size_t i;
-
-  if (packet == NULL) {
-    return 0;
-  }
-
-  for (i = 0; i < packet->frame_count; ++i) {
-    ai_quic_frame_type_t type = packet->frames[i].type;
-    if (type != AI_QUIC_FRAME_ACK && type != AI_QUIC_FRAME_PADDING) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static uint64_t ai_quic_stream_tail_resend_start(uint64_t resend_limit) {
-  uint64_t tail_bytes;
-
-  tail_bytes = AI_QUIC_PTO_RETRANSMIT_TAIL_CHUNKS * AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN;
-  if (resend_limit <= tail_bytes) {
-    return 0u;
-  }
-  return resend_limit - tail_bytes;
 }
 
 static void ai_quic_packet_init(ai_quic_packet_t *packet,
@@ -477,7 +619,7 @@ static ai_quic_result_t ai_quic_conn_append_file(const char *path,
 static ai_quic_result_t ai_quic_conn_on_app_consumed(ai_quic_conn_impl_t *conn,
                                                      ai_quic_stream_state_t *stream,
                                                      uint64_t bytes) {
-  uint64_t update_margin;
+  uint64_t prev_consumed;
 
   if (conn == NULL || stream == NULL) {
     return AI_QUIC_ERROR;
@@ -486,13 +628,19 @@ static ai_quic_result_t ai_quic_conn_on_app_consumed(ai_quic_conn_impl_t *conn,
     return AI_QUIC_ERROR;
   }
 
+  prev_consumed = conn->conn_flow.recv_consumed;
   conn->conn_flow.recv_consumed += bytes;
-  update_margin = conn->conn_flow.initial_window / 2u;
-  update_margin += AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN;
-  if (conn->conn_flow.initial_window > 0u &&
-      conn->conn_flow.recv_consumed + update_margin >= conn->conn_flow.recv_limit) {
-    conn->conn_flow.recv_limit = conn->conn_flow.recv_consumed + conn->conn_flow.initial_window;
-    conn->conn_flow.update_pending = 1;
+  ai_quic_conn_maybe_schedule_max_data(conn, stream->stream_id, bytes, "consume");
+  if (ai_quic_flow_crossed_progress_step(prev_consumed, conn->conn_flow.recv_consumed)) {
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "conn_io",
+                      "conn app consumed progress old=%llu new=%llu highest_received=%llu recv_limit=%llu update_pending=%d stream=%llu",
+                      (unsigned long long)prev_consumed,
+                      (unsigned long long)conn->conn_flow.recv_consumed,
+                      (unsigned long long)conn->conn_flow.highest_received,
+                      (unsigned long long)conn->conn_flow.recv_limit,
+                      conn->conn_flow.update_pending,
+                      (unsigned long long)stream->stream_id);
   }
   return AI_QUIC_OK;
 }
@@ -531,6 +679,14 @@ static ai_quic_result_t ai_quic_conn_prepare_response_stream(ai_quic_conn_impl_t
   }
 
   stream->response_prepared = 1;
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "conn_io",
+                    "prepared response stream=%llu file=%s bytes=%zu conn_send_limit=%llu stream_send_limit=%llu",
+                    (unsigned long long)stream->stream_id,
+                    full_path,
+                    file_len,
+                    (unsigned long long)conn->conn_flow.send_limit,
+                    (unsigned long long)stream->flow.send_limit);
   return AI_QUIC_OK;
 }
 
@@ -576,6 +732,7 @@ static ai_quic_result_t ai_quic_conn_process_client_stream(ai_quic_conn_impl_t *
 
   ready_bytes = stream->recv_contiguous_end - stream->file_written_offset;
   if (ready_bytes > 0u) {
+    uint64_t prev_written = stream->file_written_offset;
     if (ai_quic_conn_append_file(stream->output_path,
                                  stream->recv_data + (size_t)stream->file_written_offset,
                                  (size_t)ready_bytes) != AI_QUIC_OK) {
@@ -586,6 +743,21 @@ static ai_quic_result_t ai_quic_conn_process_client_stream(ai_quic_conn_impl_t *
       return AI_QUIC_ERROR;
     }
     stream->file_written_offset += ready_bytes;
+    if (ai_quic_flow_crossed_progress_step(prev_written, stream->file_written_offset) ||
+        (stream->final_size_known && stream->file_written_offset == stream->final_size)) {
+      ai_quic_log_write(
+          AI_QUIC_LOG_INFO,
+          "conn_io",
+          "client download progress stream=%llu wrote=%llu/%llu contiguous=%llu highest_received=%llu recv_limit=%llu conn_consumed=%llu conn_recv_limit=%llu",
+          (unsigned long long)stream->stream_id,
+          (unsigned long long)stream->file_written_offset,
+          (unsigned long long)stream->final_size,
+          (unsigned long long)stream->recv_contiguous_end,
+          (unsigned long long)stream->flow.highest_received,
+          (unsigned long long)stream->flow.recv_limit,
+          (unsigned long long)conn->conn_flow.recv_consumed,
+          (unsigned long long)conn->conn_flow.recv_limit);
+    }
   }
 
   if (stream->recv_fin && stream->final_size_known &&
@@ -763,6 +935,15 @@ static size_t ai_quic_conn_append_control_frames(ai_quic_conn_impl_t *conn,
   return added;
 }
 
+static size_t ai_quic_conn_append_ping_frame(ai_quic_packet_t *packet) {
+  if (packet == NULL || packet->frame_count >= AI_QUIC_MAX_FRAMES_PER_PACKET) {
+    return 0u;
+  }
+  packet->frames[packet->frame_count].type = AI_QUIC_FRAME_PING;
+  packet->frame_count += 1u;
+  return 1u;
+}
+
 static ai_quic_result_t ai_quic_conn_append_stream_frame_common(
     ai_quic_conn_impl_t *conn,
     ai_quic_packet_t *packet,
@@ -777,56 +958,66 @@ static ai_quic_result_t ai_quic_conn_append_stream_frame_common(
     return AI_QUIC_ERROR;
   }
 
-  packet->frames[packet->frame_count].type = AI_QUIC_FRAME_STREAM;
-  packet->frames[packet->frame_count].payload.stream.stream_id = stream->stream_id;
-  packet->frames[packet->frame_count].payload.stream.offset = offset;
-  packet->frames[packet->frame_count].payload.stream.data_len = chunk_len;
-  packet->frames[packet->frame_count].payload.stream.fin = fin;
-  if (chunk_len > 0u) {
-    memcpy(packet->frames[packet->frame_count].payload.stream.data,
-           stream->send_data + offset,
-           chunk_len);
-  }
-  packet->frame_count += 1u;
+  {
+    uint64_t prev_send_offset = stream->send_offset;
+    uint64_t prev_total_sent = ai_quic_conn_total_sent_bytes(conn);
 
-  if (mode == AI_QUIC_STREAM_SEND_MODE_RETRANSMIT) {
-    stream->resend_offset += chunk_len;
-    if (stream->resend_offset >= stream->resend_end_offset) {
-      if (stream->resend_wrap_offset != 0u) {
-        stream->resend_offset = 0u;
-        stream->resend_end_offset = stream->resend_wrap_offset;
-        stream->resend_wrap_offset = 0u;
-      } else {
-        stream->resend_pending = 0;
-        stream->resend_offset = 0u;
-        stream->resend_end_offset = 0u;
+    packet->frames[packet->frame_count].type = AI_QUIC_FRAME_STREAM;
+    packet->frames[packet->frame_count].payload.stream.stream_id = stream->stream_id;
+    packet->frames[packet->frame_count].payload.stream.offset = offset;
+    packet->frames[packet->frame_count].payload.stream.data_len = chunk_len;
+    packet->frames[packet->frame_count].payload.stream.fin = fin;
+    if (chunk_len > 0u) {
+      memcpy(packet->frames[packet->frame_count].payload.stream.data,
+             stream->send_data + offset,
+             chunk_len);
+    }
+    packet->frame_count += 1u;
+
+    if (mode == AI_QUIC_STREAM_SEND_MODE_NEW_DATA) {
+      stream->send_offset += chunk_len;
+      if (fin) {
+        stream->send_fin_sent = 1;
+        stream->response_finished = stream->response_prepared;
       }
     }
-  } else {
-    stream->send_offset += chunk_len;
-    if (fin) {
-      stream->send_fin_sent = 1;
-      stream->response_finished = stream->response_prepared;
+
+    conn->streams.round_robin_cursor =
+        (index + 1u) % AI_QUIC_ARRAY_LEN(conn->streams.streams);
+    if (mode == AI_QUIC_STREAM_SEND_MODE_NEW_DATA &&
+        (ai_quic_flow_crossed_progress_step(prev_send_offset, stream->send_offset) || fin ||
+         chunk_len < AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN)) {
+      ai_quic_log_write(
+          AI_QUIC_LOG_INFO,
+          "conn_io",
+          "send stream data stream=%llu offset=%llu chunk=%zu fin=%d send_progress=%llu/%zu stream_credit_rem=%llu conn_send_progress=%llu/%llu",
+          (unsigned long long)stream->stream_id,
+          (unsigned long long)offset,
+          chunk_len,
+          fin,
+          (unsigned long long)stream->send_offset,
+          stream->send_data_len,
+          (unsigned long long)(stream->flow.send_limit > stream->send_offset
+                                   ? stream->flow.send_limit - stream->send_offset
+                                   : 0u),
+          (unsigned long long)(prev_total_sent + chunk_len),
+          (unsigned long long)conn->conn_flow.send_limit);
+    } else if (mode == AI_QUIC_STREAM_SEND_MODE_RETRANSMIT) {
+      ai_quic_log_write(
+          AI_QUIC_LOG_DEBUG,
+          "conn_io",
+          "retransmit stream data stream=%llu offset=%llu chunk=%zu fin=%d lost_ranges=%zu fin_pending=%d send_progress=%llu/%zu",
+          (unsigned long long)stream->stream_id,
+          (unsigned long long)offset,
+          chunk_len,
+          fin,
+          stream->lost_ranges.count,
+          stream->lost_fin_pending,
+          (unsigned long long)stream->send_offset,
+          stream->send_data_len);
     }
   }
-
-  conn->streams.round_robin_cursor =
-      (index + 1u) % AI_QUIC_ARRAY_LEN(conn->streams.streams);
   return AI_QUIC_OK;
-}
-
-static int ai_quic_stream_has_priority_tail_retransmission(
-    const ai_quic_stream_state_t *stream) {
-  uint64_t resend_limit;
-
-  if (stream == NULL || !stream->resend_pending) {
-    return 0;
-  }
-  if (stream->send_fin_sent) {
-    return 1;
-  }
-  resend_limit = stream->send_offset;
-  return stream->send_fin_requested && resend_limit >= (uint64_t)stream->send_data_len;
 }
 
 static int ai_quic_conn_has_pending_new_stream_data(const ai_quic_conn_impl_t *conn) {
@@ -858,82 +1049,85 @@ static int ai_quic_conn_has_pending_new_stream_data(const ai_quic_conn_impl_t *c
   return 0;
 }
 
+static int ai_quic_conn_has_pending_lost_stream_data(const ai_quic_conn_impl_t *conn) {
+  size_t i;
+
+  if (conn == NULL) {
+    return 0;
+  }
+
+  for (i = 0u; i < AI_QUIC_ARRAY_LEN(conn->streams.streams); ++i) {
+    if (conn->streams.streams[i].in_use &&
+        ai_quic_stream_has_lost_data(&conn->streams.streams[i])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static ai_quic_result_t ai_quic_conn_append_retransmit_stream_frame(
     ai_quic_conn_impl_t *conn,
     ai_quic_packet_t *packet) {
-  size_t pass;
+  ai_quic_stream_state_t *selected_stream;
+  uint64_t selected_start;
+  int selected_has_data;
+  size_t selected_index;
+  size_t index;
 
   if (conn == NULL || packet == NULL) {
     return AI_QUIC_ERROR;
   }
 
-  for (pass = 0; pass < 2u; ++pass) {
-    ai_quic_stream_state_t *selected_stream;
-    uint64_t selected_limit;
-    size_t selected_index;
-    size_t index;
+  selected_stream = NULL;
+  selected_start = UINT64_MAX;
+  selected_has_data = 0;
+  selected_index = 0u;
+  for (index = 0u; index < AI_QUIC_ARRAY_LEN(conn->streams.streams); ++index) {
+    ai_quic_stream_state_t *stream = &conn->streams.streams[index];
+    uint64_t candidate_start;
+    int candidate_has_data;
 
-    selected_stream = NULL;
-    selected_limit = 0u;
-    selected_index = 0u;
-    for (index = 0; index < AI_QUIC_ARRAY_LEN(conn->streams.streams); ++index) {
-      ai_quic_stream_state_t *stream;
-      uint64_t resend_limit;
-
-      stream = &conn->streams.streams[index];
-      if (!stream->in_use || !stream->resend_pending ||
-          ai_quic_stream_has_priority_tail_retransmission(stream) != (int)(pass == 0u)) {
-        continue;
-      }
-
-      resend_limit = stream->resend_end_offset;
-      if (resend_limit == 0u) {
-        resend_limit = stream->send_fin_sent ? (uint64_t)stream->send_data_len
-                                             : stream->send_offset;
-      }
-      if (stream->resend_offset >= resend_limit) {
-        if (stream->resend_wrap_offset != 0u) {
-          stream->resend_offset = 0u;
-          stream->resend_end_offset = stream->resend_wrap_offset;
-          stream->resend_wrap_offset = 0u;
-        } else {
-          stream->resend_pending = 0;
-          stream->resend_offset = 0u;
-          stream->resend_end_offset = 0u;
-        }
-        continue;
-      }
-
-      if (selected_stream == NULL || resend_limit > selected_limit ||
-          (resend_limit == selected_limit &&
-           stream->stream_id > selected_stream->stream_id)) {
-        selected_stream = stream;
-        selected_limit = resend_limit;
-        selected_index = index;
-      }
+    if (!stream->in_use || !ai_quic_stream_has_lost_data(stream)) {
+      continue;
     }
 
-    if (selected_stream != NULL) {
-      size_t remaining;
-      size_t chunk_len;
-      int fin;
+    candidate_has_data = stream->lost_ranges.count > 0u;
+    candidate_start = candidate_has_data ? stream->lost_ranges.ranges[0].start
+                                         : (uint64_t)stream->send_data_len;
 
-      remaining = (size_t)(selected_limit - selected_stream->resend_offset);
-      chunk_len = remaining > AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN
-                      ? AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN
-                      : remaining;
-      fin = selected_stream->send_fin_sent &&
-            selected_stream->send_fin_requested &&
-            selected_stream->resend_offset + chunk_len == selected_stream->send_data_len;
-      return ai_quic_conn_append_stream_frame_common(conn,
-                                                     packet,
-                                                     selected_stream,
-                                                     selected_index,
-                                                     selected_stream->resend_offset,
-                                                     chunk_len,
-                                                     fin,
-                                                     AI_QUIC_STREAM_SEND_MODE_RETRANSMIT);
+    if (selected_stream == NULL ||
+        (candidate_has_data && !selected_has_data) ||
+        (candidate_has_data == selected_has_data &&
+         (candidate_start < selected_start ||
+          (candidate_start == selected_start &&
+           stream->stream_id < selected_stream->stream_id)))) {
+      selected_stream = stream;
+      selected_start = candidate_start;
+      selected_has_data = candidate_has_data;
+      selected_index = index;
     }
+  }
+
+  if (selected_stream != NULL) {
+    uint64_t offset;
+    size_t chunk_len;
+    int fin;
+
+    if (!ai_quic_stream_pop_lost_range(selected_stream,
+                                       AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN,
+                                       &offset,
+                                       &chunk_len,
+                                       &fin)) {
+      return AI_QUIC_ERROR;
+    }
+    return ai_quic_conn_append_stream_frame_common(conn,
+                                                   packet,
+                                                   selected_stream,
+                                                   selected_index,
+                                                   offset,
+                                                   chunk_len,
+                                                   fin,
+                                                   AI_QUIC_STREAM_SEND_MODE_RETRANSMIT);
   }
 
   return AI_QUIC_ERROR;
@@ -984,6 +1178,16 @@ static ai_quic_result_t ai_quic_conn_append_new_stream_frame(ai_quic_conn_impl_t
       if (conn->conn_flow.last_blocked_limit != conn->conn_flow.send_limit) {
         conn->conn_flow.blocked_pending = 1;
         conn->conn_flow.last_blocked_limit = conn->conn_flow.send_limit;
+        ai_quic_log_write(
+            AI_QUIC_LOG_INFO,
+            "conn_io",
+            "conn flow blocked stream=%llu total_sent=%llu conn_send_limit=%llu stream_send_offset=%llu stream_send_limit=%llu remaining=%zu",
+            (unsigned long long)stream->stream_id,
+            (unsigned long long)total_sent,
+            (unsigned long long)conn->conn_flow.send_limit,
+            (unsigned long long)stream->send_offset,
+            (unsigned long long)stream->flow.send_limit,
+            remaining);
       }
       continue;
     }
@@ -991,6 +1195,15 @@ static ai_quic_result_t ai_quic_conn_append_new_stream_frame(ai_quic_conn_impl_t
       if (stream->flow.last_blocked_limit != stream->flow.send_limit) {
         stream->flow.blocked_pending = 1;
         stream->flow.last_blocked_limit = stream->flow.send_limit;
+        ai_quic_log_write(
+            AI_QUIC_LOG_INFO,
+            "conn_io",
+            "stream flow blocked stream=%llu send_offset=%llu stream_send_limit=%llu conn_credit=%llu remaining=%zu",
+            (unsigned long long)stream->stream_id,
+            (unsigned long long)stream->send_offset,
+            (unsigned long long)stream->flow.send_limit,
+            (unsigned long long)conn_credit,
+            remaining);
       }
       continue;
     }
@@ -1004,6 +1217,21 @@ static ai_quic_result_t ai_quic_conn_append_new_stream_frame(ai_quic_conn_impl_t
     }
     if (chunk_len > AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN) {
       chunk_len = AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN;
+    }
+    if ((uint64_t)chunk_len < (uint64_t)remaining ||
+        chunk_len < AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN) {
+      ai_quic_log_write(
+          AI_QUIC_LOG_INFO,
+          "conn_io",
+          "send chunk constrained stream=%llu remaining=%zu chosen=%zu stream_credit=%llu conn_credit=%llu chunk_cap=%u send_offset=%llu total_sent=%llu",
+          (unsigned long long)stream->stream_id,
+          remaining,
+          chunk_len,
+          (unsigned long long)stream_credit,
+          (unsigned long long)conn_credit,
+          AI_QUIC_MAX_STREAM_SEND_CHUNK_LEN,
+          (unsigned long long)stream->send_offset,
+          (unsigned long long)total_sent);
     }
     fin = stream->send_fin_requested && stream->send_offset + chunk_len == stream->send_data_len;
     if (remaining == 0u) {
@@ -1024,43 +1252,6 @@ static ai_quic_result_t ai_quic_conn_append_new_stream_frame(ai_quic_conn_impl_t
   return AI_QUIC_ERROR;
 }
 
-static void ai_quic_conn_schedule_stream_retransmissions(ai_quic_conn_impl_t *conn) {
-  size_t i;
-
-  if (conn == NULL) {
-    return;
-  }
-
-  for (i = 0; i < AI_QUIC_ARRAY_LEN(conn->streams.streams); ++i) {
-    ai_quic_stream_state_t *stream = &conn->streams.streams[i];
-    uint64_t resend_limit;
-    uint64_t tail_start;
-    if (!stream->in_use || stream->send_offset == 0u) {
-      continue;
-    }
-    resend_limit = stream->send_fin_sent ? (uint64_t)stream->send_data_len : stream->send_offset;
-    if (resend_limit == 0u) {
-      continue;
-    }
-    if (!stream->resend_pending) {
-      stream->resend_pending = 1;
-      stream->resend_end_offset = resend_limit;
-      stream->resend_wrap_offset = 0u;
-      if (stream->send_fin_sent) {
-        tail_start = ai_quic_stream_tail_resend_start(resend_limit);
-        stream->resend_offset = tail_start;
-        stream->resend_wrap_offset = tail_start;
-      } else {
-        stream->resend_offset = 0u;
-      }
-      continue;
-    }
-    if (resend_limit > stream->resend_end_offset) {
-      stream->resend_end_offset = resend_limit;
-    }
-  }
-}
-
 static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
                                                     uint64_t now_ms,
                                                     ai_quic_pending_datagram_t *pending,
@@ -1070,11 +1261,14 @@ static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
   size_t packet_budget;
   size_t retransmit_budget;
   size_t new_data_budget;
+  size_t pto_probe_budget;
   ai_quic_packet_number_space_t *app_space;
   ai_quic_app_flush_stats_t stats;
   int throttle_new_data;
   int recent_credit_update;
   int retransmit_only_mode;
+  int has_new_data;
+  int has_lost_data;
 
   if (conn == NULL || pending == NULL || pending_count == NULL || !conn->can_send_1rtt) {
     return AI_QUIC_ERROR;
@@ -1082,12 +1276,29 @@ static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
 
   memset(&stats, 0, sizeof(stats));
   app_space = ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_APP_DATA);
-  if (app_space != NULL && app_space->pto_deadline_ms != 0u &&
-      now_ms >= app_space->pto_deadline_ms) {
-    ai_quic_conn_schedule_stream_retransmissions(conn);
-    app_space->pto_deadline_ms = now_ms + 100u;
+  pto_probe_budget = 0u;
+  if (app_space != NULL && ai_quic_loss_on_timeout(conn, AI_QUIC_PN_SPACE_APP_DATA, now_ms)) {
+    ai_quic_loss_state_t *loss = &conn->loss_state[AI_QUIC_PN_SPACE_APP_DATA];
+    pto_probe_budget = AI_QUIC_PTO_PROBE_PACKET_BUDGET;
+    ai_quic_log_write(
+        AI_QUIC_LOG_INFO,
+        "conn_io",
+        "pto fire space=app pto_count=%u latest_sent=%llu largest_acked=%llu ack_age=%llu bytes_in_flight=%llu pending_new=%d pending_lost=%d conn_send=%llu/%llu",
+        loss->pto_count,
+        (unsigned long long)loss->latest_sent_packet,
+        (unsigned long long)loss->largest_acked_packet,
+        (unsigned long long)(loss->last_ack_ms == 0u || now_ms < loss->last_ack_ms
+                                 ? 0u
+                                 : now_ms - loss->last_ack_ms),
+        (unsigned long long)app_space->bytes_in_flight,
+        ai_quic_conn_has_pending_new_stream_data(conn),
+        ai_quic_conn_has_pending_lost_stream_data(conn),
+        (unsigned long long)ai_quic_conn_total_sent_bytes(conn),
+        (unsigned long long)conn->conn_flow.send_limit);
   }
 
+  has_new_data = ai_quic_conn_has_pending_new_stream_data(conn);
+  has_lost_data = ai_quic_conn_has_pending_lost_stream_data(conn);
   throttle_new_data =
       conn->last_peer_data_blocked_ms != 0u &&
       now_ms >= conn->last_peer_data_blocked_ms &&
@@ -1098,7 +1309,7 @@ static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
        (conn->last_peer_stream_max_data_ms != 0u &&
         now_ms >= conn->last_peer_stream_max_data_ms &&
         now_ms - conn->last_peer_stream_max_data_ms <= AI_QUIC_PEER_CREDIT_UPDATE_COOLDOWN_MS));
-  retransmit_only_mode = !ai_quic_conn_has_pending_new_stream_data(conn);
+  retransmit_only_mode = !has_new_data && has_lost_data;
   retransmit_budget = recent_credit_update ? 0u : AI_QUIC_APP_DATA_RETRANSMIT_BUDGET;
   new_data_budget = throttle_new_data ? AI_QUIC_APP_DATA_THROTTLED_NEW_DATA_BUDGET
                                       : AI_QUIC_APP_DATA_NEW_DATA_BUDGET;
@@ -1110,6 +1321,32 @@ static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
     packet_budget = AI_QUIC_APP_DATA_RETRANSMIT_ONLY_PACKET_BUDGET;
     retransmit_budget = AI_QUIC_APP_DATA_RETRANSMIT_ONLY_BUDGET;
     new_data_budget = 0u;
+  }
+  if (packet_budget < pto_probe_budget) {
+    packet_budget = pto_probe_budget;
+  }
+  if (throttle_new_data || recent_credit_update || retransmit_only_mode) {
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "conn_io",
+                      "flush app data budgets throttle_new=%d recent_credit=%d retransmit_only=%d packet_budget=%zu retransmit_budget=%zu new_data_budget=%zu pto_probes=%zu conn_send=%llu/%llu peer_blocked_age=%llu peer_max_data_age=%llu peer_stream_max_age=%llu",
+                      throttle_new_data,
+                      recent_credit_update,
+                      retransmit_only_mode,
+                      packet_budget,
+                      retransmit_budget,
+                      new_data_budget,
+                      pto_probe_budget,
+                      (unsigned long long)ai_quic_conn_total_sent_bytes(conn),
+                      (unsigned long long)conn->conn_flow.send_limit,
+                      (unsigned long long)(conn->last_peer_data_blocked_ms == 0u
+                                               ? 0u
+                                               : now_ms - conn->last_peer_data_blocked_ms),
+                      (unsigned long long)(conn->last_peer_max_data_ms == 0u
+                                               ? 0u
+                                               : now_ms - conn->last_peer_max_data_ms),
+                      (unsigned long long)(conn->last_peer_stream_max_data_ms == 0u
+                                               ? 0u
+                                               : now_ms - conn->last_peer_stream_max_data_ms));
   }
 
   for (bursts = 0; bursts < packet_budget && *pending_count < pending_capacity;
@@ -1129,12 +1366,41 @@ static ai_quic_result_t ai_quic_conn_flush_app_data(ai_quic_conn_impl_t *conn,
       stats.control_frames += added_control;
       have_frames = 1;
     }
-    if (packet.frame_count < AI_QUIC_MAX_FRAMES_PER_PACKET && retransmit_budget > 0u &&
+    if (packet.frame_count < AI_QUIC_MAX_FRAMES_PER_PACKET && pto_probe_budget > 0u) {
+      if (ai_quic_conn_append_retransmit_stream_frame(conn, &packet) == AI_QUIC_OK) {
+        pto_probe_budget -= 1u;
+        stats.retransmit_frames += 1u;
+        have_frames = 1;
+        ai_quic_log_write(AI_QUIC_LOG_DEBUG,
+                          "conn_io",
+                          "pto_probe_pick kind=lost frame_count=%zu",
+                          packet.frame_count);
+      } else if (ai_quic_conn_append_new_stream_frame(conn, &packet) == AI_QUIC_OK) {
+        pto_probe_budget -= 1u;
+        stats.new_data_frames += 1u;
+        have_frames = 1;
+        ai_quic_log_write(AI_QUIC_LOG_DEBUG,
+                          "conn_io",
+                          "pto_probe_pick kind=new frame_count=%zu",
+                          packet.frame_count);
+      } else if (ai_quic_conn_append_ping_frame(&packet) > 0u) {
+        pto_probe_budget -= 1u;
+        stats.control_frames += 1u;
+        have_frames = 1;
+        ai_quic_log_write(AI_QUIC_LOG_DEBUG,
+                          "conn_io",
+                          "pto_probe_pick kind=ping frame_count=%zu",
+                          packet.frame_count);
+      }
+    }
+    if (!have_frames && packet.frame_count < AI_QUIC_MAX_FRAMES_PER_PACKET &&
+        retransmit_budget > 0u &&
         ai_quic_conn_append_retransmit_stream_frame(conn, &packet) == AI_QUIC_OK) {
       retransmit_budget -= 1u;
       stats.retransmit_frames += 1u;
       have_frames = 1;
-    } else if (packet.frame_count < AI_QUIC_MAX_FRAMES_PER_PACKET && new_data_budget > 0u &&
+    } else if (!have_frames && packet.frame_count < AI_QUIC_MAX_FRAMES_PER_PACKET &&
+               new_data_budget > 0u &&
                ai_quic_conn_append_new_stream_frame(conn, &packet) == AI_QUIC_OK) {
       new_data_budget -= 1u;
       stats.new_data_frames += 1u;
@@ -1585,6 +1851,10 @@ static ai_quic_result_t ai_quic_conn_on_stream(ai_quic_conn_impl_t *conn,
     return AI_QUIC_ERROR;
   }
   conn->conn_flow.highest_received += newly_received;
+  ai_quic_conn_maybe_schedule_max_data(conn,
+                                       stream->stream_id,
+                                       newly_received,
+                                       "receive");
 
   if (conn->is_server) {
     if (ai_quic_conn_process_server_stream(conn, stream, www_root) != AI_QUIC_OK) {
@@ -1667,8 +1937,7 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
     }
     switch (frame->type) {
       case AI_QUIC_FRAME_ACK:
-        ai_quic_pn_space_on_ack(ai_quic_conn_space(conn, space_id),
-                                frame->payload.ack.largest_acked);
+        ai_quic_conn_on_ack_frame(conn, space_id, &frame->payload.ack, now_ms);
         break;
       case AI_QUIC_FRAME_CRYPTO:
         if (ai_quic_conn_on_crypto(conn, space_id, packet, &frame->payload.crypto) !=
@@ -1697,9 +1966,11 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
       case AI_QUIC_FRAME_MAX_DATA:
         ai_quic_log_write(AI_QUIC_LOG_INFO,
                           "conn_io",
-                          "recv MAX_DATA old=%llu new=%llu",
+                          "recv MAX_DATA old=%llu new=%llu total_sent=%llu blocked_pending=%d",
                           (unsigned long long)conn->conn_flow.send_limit,
-                          (unsigned long long)frame->payload.max_data.maximum_data);
+                          (unsigned long long)frame->payload.max_data.maximum_data,
+                          (unsigned long long)ai_quic_conn_total_sent_bytes(conn),
+                          conn->conn_flow.blocked_pending);
         ai_quic_flow_controller_set_send_limit(&conn->conn_flow,
                                                frame->payload.max_data.maximum_data);
         conn->last_peer_max_data_ms = now_ms;
@@ -1712,10 +1983,15 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
         if (stream != NULL) {
           ai_quic_log_write(AI_QUIC_LOG_INFO,
                             "conn_io",
-                            "recv MAX_STREAM_DATA stream=%llu old=%llu new=%llu",
+                            "recv MAX_STREAM_DATA stream=%llu old=%llu new=%llu send_offset=%llu remaining=%zu blocked_pending=%d",
                             (unsigned long long)stream->stream_id,
                             (unsigned long long)stream->flow.send_limit,
-                            (unsigned long long)frame->payload.max_stream_data.maximum_stream_data);
+                            (unsigned long long)frame->payload.max_stream_data.maximum_stream_data,
+                            (unsigned long long)stream->send_offset,
+                            stream->send_data_len > stream->send_offset
+                                ? stream->send_data_len - (size_t)stream->send_offset
+                                : 0u,
+                            stream->flow.blocked_pending);
           ai_quic_flow_controller_set_send_limit(
               &stream->flow,
               frame->payload.max_stream_data.maximum_stream_data);

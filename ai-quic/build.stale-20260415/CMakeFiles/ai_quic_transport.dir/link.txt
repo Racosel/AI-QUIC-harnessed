@@ -1,2 +1,0 @@
-/usr/bin/ar qc lib/libai_quic_transport.a CMakeFiles/ai_quic_transport.dir/src/transport/conn.c.o CMakeFiles/ai_quic_transport.dir/src/transport/dispatcher.c.o
-/usr/bin/ranlib lib/libai_quic_transport.a

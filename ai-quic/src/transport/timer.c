@@ -12,13 +12,6 @@ void ai_quic_timer_on_space_active(ai_quic_conn_impl_t *conn,
   if (space == NULL) {
     return;
   }
-
-  if (space_id == AI_QUIC_PN_SPACE_APP_DATA && !conn->handshake_confirmed) {
-    space->pto_deadline_ms = 0u;
-    return;
-  }
-
-  if (space->bytes_in_flight > 0u) {
-    space->pto_deadline_ms = now_ms + 100u;
-  }
+  (void)space;
+  ai_quic_loss_update_timer(conn, space_id, now_ms);
 }

@@ -118,5 +118,4 @@ void ai_quic_pn_space_on_ack(ai_quic_packet_number_space_t *space,
     space->largest_acked_by_peer = largest_acked;
   }
   space->ack_needed = 0;
-  space->bytes_in_flight = 0u;
 }
