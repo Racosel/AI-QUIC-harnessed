@@ -118,6 +118,7 @@ add_library(
   src/transport/pn_space.c
   src/transport/stream.c
   src/transport/timer.c
+  src/transport/token.c
   src/transport/transport_params.c
   src/transport/version.c
   src/transport/version_negotiation.c

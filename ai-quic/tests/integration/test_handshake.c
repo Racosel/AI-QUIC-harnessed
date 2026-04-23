@@ -47,13 +47,23 @@ static int test_handshake_and_download(void) {
 
   AI_QUIC_ASSERT(ai_quic_endpoint_pop_datagram(client, datagram, sizeof(datagram), &written) ==
                  AI_QUIC_OK);
-  if (ai_quic_endpoint_receive_datagram(server, datagram, written, 1u) != AI_QUIC_OK) {
+  if (ai_quic_endpoint_receive_datagram_from(server,
+                                             datagram,
+                                             written,
+                                             (const uint8_t *)"client-addr",
+                                             11u,
+                                             1u) != AI_QUIC_OK) {
     fprintf(stderr, "server receive error: %s\n", ai_quic_endpoint_error(server));
     return 1;
   }
   AI_QUIC_ASSERT(ai_quic_endpoint_pop_datagram(server, datagram, sizeof(datagram), &written) ==
                  AI_QUIC_OK);
-  if (ai_quic_endpoint_receive_datagram(client, datagram, written, 2u) != AI_QUIC_OK) {
+  if (ai_quic_endpoint_receive_datagram_from(client,
+                                             datagram,
+                                             written,
+                                             (const uint8_t *)"server-addr",
+                                             11u,
+                                             2u) != AI_QUIC_OK) {
     fprintf(stderr, "client receive error: %s\n", ai_quic_endpoint_error(client));
     return 1;
   }
@@ -205,6 +215,70 @@ static int test_v2_handshake_and_download(void) {
   return 0;
 }
 
+static int test_retry_handshake_and_download(void) {
+  ai_quic_endpoint_config_t client_config;
+  ai_quic_endpoint_config_t server_config;
+  ai_quic_endpoint_t *client;
+  ai_quic_endpoint_t *server;
+  ai_quic_fake_link_t link;
+  ai_quic_endpoint_impl_t *client_impl;
+  ai_quic_endpoint_impl_t *server_impl;
+  static const uint8_t kPayload[] = "retry integration payload";
+  char server_root[] = "/tmp/ai_quic_retry_serverXXXXXX";
+  char client_root[] = "/tmp/ai_quic_retry_clientXXXXXX";
+  char server_file[512];
+  char client_file[512];
+  uint8_t *download_data;
+  size_t download_len;
+  ai_quic_conn_info_t info;
+
+  AI_QUIC_ASSERT(mkdtemp(server_root) != NULL);
+  AI_QUIC_ASSERT(mkdtemp(client_root) != NULL);
+  snprintf(server_file, sizeof(server_file), "%s/%s", server_root, "retry.txt");
+  snprintf(client_file, sizeof(client_file), "%s/%s", client_root, "retry.txt");
+  AI_QUIC_ASSERT(ai_quic_fs_write_binary_file(server_file, kPayload, sizeof(kPayload) - 1u) ==
+                 AI_QUIC_OK);
+
+  ai_quic_endpoint_config_init(&client_config, AI_QUIC_ENDPOINT_ROLE_CLIENT);
+  ai_quic_endpoint_config_init(&server_config, AI_QUIC_ENDPOINT_ROLE_SERVER);
+  client_config.downloads_root = client_root;
+  server_config.www_root = server_root;
+  client_config.qlog_path = "/tmp/ai_quic_retry_client.qlog";
+  server_config.qlog_path = "/tmp/ai_quic_retry_server.qlog";
+  server_config.testcase = "retry";
+
+  client = ai_quic_endpoint_create(&client_config);
+  server = ai_quic_endpoint_create(&server_config);
+  AI_QUIC_ASSERT(client != NULL);
+  AI_QUIC_ASSERT(server != NULL);
+  AI_QUIC_ASSERT(ai_quic_endpoint_start_client(client, "server4:443", "/retry.txt") ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_fake_link_init(&link, client, server) == 0);
+  AI_QUIC_ASSERT(ai_quic_fake_link_pump(&link) == 0);
+
+  client_impl = (ai_quic_endpoint_impl_t *)client;
+  server_impl = (ai_quic_endpoint_impl_t *)server;
+  AI_QUIC_ASSERT(client_impl != NULL && client_impl->conn != NULL);
+  AI_QUIC_ASSERT(server_impl != NULL && server_impl->conn != NULL);
+  AI_QUIC_ASSERT(client_impl->conn->retry_accepted);
+  AI_QUIC_ASSERT(server_impl->conn->retry_token_validated);
+  AI_QUIC_ASSERT(server_impl->conn->address_validation_source ==
+                 AI_QUIC_ADDRESS_VALIDATION_RETRY_TOKEN);
+
+  AI_QUIC_ASSERT(ai_quic_endpoint_connection_info(client, &info) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(info.handshake_completed);
+  AI_QUIC_ASSERT(info.handshake_confirmed);
+  AI_QUIC_ASSERT(info.can_send_1rtt);
+  AI_QUIC_ASSERT(ai_quic_fs_read_binary_file(client_file, &download_data, &download_len) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT(download_len == sizeof(kPayload) - 1u);
+  AI_QUIC_ASSERT(memcmp(download_data, kPayload, download_len) == 0);
+  free(download_data);
+  ai_quic_endpoint_destroy(client);
+  ai_quic_endpoint_destroy(server);
+  return 0;
+}
+
 static int test_chacha20_handshake_and_download(void) {
   ai_quic_endpoint_config_t client_config;
   ai_quic_endpoint_config_t server_config;
@@ -263,6 +337,7 @@ int main(void) {
   AI_QUIC_ASSERT(test_handshake_and_download() == 0);
   AI_QUIC_ASSERT(test_multi_stream_transfer() == 0);
   AI_QUIC_ASSERT(test_v2_handshake_and_download() == 0);
+  AI_QUIC_ASSERT(test_retry_handshake_and_download() == 0);
   AI_QUIC_ASSERT(test_chacha20_handshake_and_download() == 0);
   puts("ai_quic_integration_test: ok");
   return 0;

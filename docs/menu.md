@@ -19,6 +19,8 @@
 | 审查步骤03代码逻辑设计       | `docs/plans/step03-v2-logic-design.md` + `docs/plans/repo-file-hierarchy.md`                    | 编码前先锁定 version ops、codec、TLS 与连接状态边界。 |
 | 规划步骤04 ChaCha20 套件约束 | `docs/plans/step04-chacha20-doc-index.md` + `docs/quic-interop-runner/quic-test-cases.md`      | 先锁定 chacha20 语义，再补 TLS cipher policy 与 crypto 边界。 |
 | 审查步骤04代码逻辑设计       | `docs/plans/step04-chacha20-logic-design.md` + `docs/plans/repo-file-hierarchy.md`              | 编码前先锁定 cipher suite ops、AEAD 与 header protection 边界。 |
+| 规划步骤05 Retry / Token / 地址验证 | `docs/plans/step05-retry-doc-index.md` + `docs/quic-interop-runner/quic-test-cases.md`    | 先锁定 retry 语义，再补 Retry、token、地址验证与反放大边界。 |
+| 审查步骤05代码逻辑设计       | `docs/plans/step05-retry-logic-design.md` + `docs/plans/repo-file-hierarchy.md`                 | 编码前先锁定 token service、dispatcher retry gate、Retry codec 与 TP 校验链。 |
 | 查阅 BoringSSL 接入资料      | `docs/boringssl/README.md` + `docs/boringssl/porting.md`                                        | 先看索引，再按迁移/构建/API 约束落地。   |
 | 规划仓库代码层级与模块落点   | `docs/plans/repo-file-hierarchy.md` + `docs/plans/plan-quic.md`                                 | 先确认目录边界，再决定代码与测试落点。   |
 | 互操作测试执行/排障          | `docs/quic-interop-runner/how-to-run.md` + `docs/quic-interop-runner/implement-requirements.md` | 先确认运行机制，再确认退出码约束。       |
@@ -46,6 +48,8 @@
   - 若即将编码步骤03，先读 `docs/plans/step03-v2-logic-design.md` 完成设计审查。
   - 若当前已明确推进步骤04，再读 `docs/plans/step04-chacha20-doc-index.md`。
   - 若即将编码步骤04，先读 `docs/plans/step04-chacha20-logic-design.md` 完成设计审查。
+  - 若当前已明确推进步骤05，再读 `docs/plans/step05-retry-doc-index.md`。
+  - 若即将编码步骤05，先读 `docs/plans/step05-retry-logic-design.md` 完成设计审查。
   - 若需要决定新代码、新测试或 interop 入口应落在哪个目录，再读 `docs/plans/repo-file-hierarchy.md`。
   - 若涉及团队流程/审计体系，再读 `docs/plans/plan-ai.md`。
 
@@ -102,6 +106,8 @@
 | `docs/plans/step03-v2-logic-design.md`                  | P0               | 步骤03的 version ops / compatible negotiation / codec 行为设计 | 准备进入步骤03编码前的设计审查 | 先读（编码前）                |
 | `docs/plans/step04-chacha20-doc-index.md`               | P0               | 步骤04 ChaCha20 套件约束的专项文档目录与阅读顺序 | 已进入步骤04规划、实现或排障        | 先读（步骤04专项）            |
 | `docs/plans/step04-chacha20-logic-design.md`            | P0               | 步骤04的 TLS cipher policy / AEAD / header protection 行为设计 | 准备进入步骤04编码前的设计审查 | 先读（编码前）                |
+| `docs/plans/step05-retry-doc-index.md`                  | P0               | 步骤05 Retry / Token / 地址验证的专项文档目录与阅读顺序 | 已进入步骤05规划、实现或排障     | 先读（步骤05专项）            |
+| `docs/plans/step05-retry-logic-design.md`               | P0               | 步骤05的 Retry / token service / address validation / anti-amplification 行为设计 | 准备进入步骤05编码前的设计审查 | 先读（编码前）                |
 | `docs/plans/repo-file-hierarchy.md`                     | P0               | 当前仓库层级、建议中的 `ai-quic/` 目录与 `xquic` 模块映射 | 需要决定代码目录落点或建立实现骨架 | 先读（目录规划）              |
 | `docs/boringssl/README.md`                              | P0               | BoringSSL 导读索引与阅读顺序                 | 需要接入或排障 BoringSSL 相关问题     | 先读（BoringSSL）             |
 | `docs/boringssl/porting.md`                             | P1               | OpenSSL 到 BoringSSL 的迁移要点              | 迁移 TLS 代码或修 API 兼容问题        | 后读（在索引后）              |

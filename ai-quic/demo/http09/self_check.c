@@ -18,16 +18,24 @@ static int ai_quic_demo_pump(ai_quic_endpoint_t *client,
     while (ai_quic_endpoint_has_pending_datagrams(client)) {
       if (ai_quic_endpoint_pop_datagram(client, buffer, sizeof(buffer), &written) !=
               AI_QUIC_OK ||
-          ai_quic_endpoint_receive_datagram(server, buffer, written, ai_quic_now_ms()) !=
-              AI_QUIC_OK) {
+          ai_quic_endpoint_receive_datagram_from(server,
+                                                 buffer,
+                                                 written,
+                                                 (const uint8_t *)"client-addr",
+                                                 11u,
+                                                 ai_quic_now_ms()) != AI_QUIC_OK) {
         return 1;
       }
     }
     while (ai_quic_endpoint_has_pending_datagrams(server)) {
       if (ai_quic_endpoint_pop_datagram(server, buffer, sizeof(buffer), &written) !=
               AI_QUIC_OK ||
-          ai_quic_endpoint_receive_datagram(client, buffer, written, ai_quic_now_ms()) !=
-              AI_QUIC_OK) {
+          ai_quic_endpoint_receive_datagram_from(client,
+                                                 buffer,
+                                                 written,
+                                                 (const uint8_t *)"server-addr",
+                                                 11u,
+                                                 ai_quic_now_ms()) != AI_QUIC_OK) {
         return 1;
       }
     }

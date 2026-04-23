@@ -18,7 +18,8 @@ typedef enum ai_quic_packet_type {
   AI_QUIC_PACKET_TYPE_INITIAL = 0,
   AI_QUIC_PACKET_TYPE_HANDSHAKE = 1,
   AI_QUIC_PACKET_TYPE_ONE_RTT = 2,
-  AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION = 3
+  AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION = 3,
+  AI_QUIC_PACKET_TYPE_RETRY = 4
 } ai_quic_packet_type_t;
 
 typedef enum ai_quic_encryption_level {
@@ -32,6 +33,7 @@ typedef struct ai_quic_packet_header {
   ai_quic_version_t version;
   ai_quic_cid_t dcid;
   ai_quic_cid_t scid;
+  ai_quic_cid_t retry_original_dcid;
   uint64_t packet_number;
   size_t token_len;
   uint8_t token[AI_QUIC_MAX_TOKEN_LEN];

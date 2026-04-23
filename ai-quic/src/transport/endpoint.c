@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ai_quic/log.h"
 #include "common_internal.h"
 #include "transport_internal.h"
 
@@ -13,6 +14,8 @@ static const char *ai_quic_qlog_packet_type_name(ai_quic_packet_type_t type) {
       return "initial";
     case AI_QUIC_PACKET_TYPE_HANDSHAKE:
       return "handshake";
+    case AI_QUIC_PACKET_TYPE_RETRY:
+      return "retry";
     case AI_QUIC_PACKET_TYPE_ONE_RTT:
       return "1rtt";
     case AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION:
@@ -222,6 +225,10 @@ ai_quic_endpoint_t *ai_quic_endpoint_create(
       config->qlog_path != NULL ? config->qlog_path : "/tmp/ai_quic_qlog.jsonl",
       "ai-quic-endpoint",
       config->role == AI_QUIC_ENDPOINT_ROLE_SERVER ? "server" : "client");
+  ai_quic_dispatcher_set_retry_enabled(
+      endpoint->dispatcher,
+      config->role == AI_QUIC_ENDPOINT_ROLE_SERVER && config->testcase != NULL &&
+          strcmp(config->testcase, "retry") == 0);
   return (ai_quic_endpoint_t *)endpoint;
 }
 
@@ -358,10 +365,12 @@ ai_quic_result_t ai_quic_endpoint_queue_request(ai_quic_endpoint_t *endpoint,
   return AI_QUIC_OK;
 }
 
-ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
-                                                   const uint8_t *datagram,
-                                                   size_t datagram_len,
-                                                   uint64_t now_ms) {
+ai_quic_result_t ai_quic_endpoint_receive_datagram_from(ai_quic_endpoint_t *endpoint,
+                                                        const uint8_t *datagram,
+                                                        size_t datagram_len,
+                                                        const uint8_t *peer_addr,
+                                                        size_t peer_addr_len,
+                                                        uint64_t now_ms) {
   ai_quic_endpoint_impl_t *impl;
   ai_quic_dispatch_decision_t decision;
   ai_quic_packet_t packet;
@@ -385,10 +394,13 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
     return AI_QUIC_ERROR;
   }
 
-  if (!ai_quic_dispatcher_route_datagram(impl->dispatcher,
-                                         datagram,
-                                         datagram_len,
-                                         &decision)) {
+  if (!ai_quic_dispatcher_route_datagram_from(impl->dispatcher,
+                                              datagram,
+                                              datagram_len,
+                                              peer_addr,
+                                              peer_addr_len,
+                                              now_ms,
+                                              &decision)) {
     impl->status = AI_QUIC_ERROR;
     ai_quic_set_error(impl->error,
                       sizeof(impl->error),
@@ -447,6 +459,51 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
     return AI_QUIC_OK;
   }
 
+  if (decision.action == AI_QUIC_DISPATCH_SEND_RETRY) {
+    ai_quic_packet_t retry_packet;
+    ai_quic_pending_datagram_t out;
+
+    if (ai_quic_build_retry(&decision.header,
+                            &decision.retry_source_cid,
+                            decision.retry_token,
+                            decision.retry_token_len,
+                            &retry_packet) != AI_QUIC_OK ||
+        ai_quic_packet_encode(&retry_packet, out.bytes, sizeof(out.bytes), &out.len) !=
+            AI_QUIC_OK) {
+      free(staged);
+      return AI_QUIC_ERROR;
+    }
+    retry_packet.header.packet_length = out.len;
+    ai_quic_qlog_packet(impl->qlog,
+                        now_ms,
+                        "packet_sent",
+                        &retry_packet,
+                        out.bytes,
+                        out.len);
+    ai_quic_qlog_write_key_value(impl->qlog,
+                                 now_ms,
+                                 "transport",
+                                 "retry_sent",
+                                 "token",
+                                 decision.retry_token_len > 0u ? "issued" : "missing");
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "endpoint",
+                      "send stateless retry token_len=%zu peer_addr_len=%zu",
+                      decision.retry_token_len,
+                      peer_addr_len);
+    if (ai_quic_endpoint_push(impl, &out) != AI_QUIC_OK) {
+      impl->status = AI_QUIC_ERROR;
+      ai_quic_set_error(impl->error,
+                        sizeof(impl->error),
+                        "pending datagram queue overflow capacity=%u",
+                        (unsigned)AI_QUIC_MAX_PENDING_DATAGRAMS);
+      free(staged);
+      return AI_QUIC_ERROR;
+    }
+    free(staged);
+    return AI_QUIC_OK;
+  }
+
   if (impl->conn == NULL && decision.action == AI_QUIC_DISPATCH_CREATE_CONN) {
     impl->conn = (ai_quic_conn_impl_t *)ai_quic_conn_create(decision.header.version, 1);
     if (impl->conn == NULL ||
@@ -462,6 +519,14 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
     }
     impl->conn->compatible_v2_enabled =
         impl->config.testcase != NULL && strcmp(impl->config.testcase, "v2") == 0;
+    if (decision.token_valid) {
+      impl->conn->retry_token_validated = 1;
+      impl->conn->address_validated = 1;
+      impl->conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_RETRY_TOKEN;
+      impl->conn->original_destination_cid = decision.original_destination_cid;
+      impl->conn->retry_source_cid = decision.retry_source_cid;
+      impl->conn->current_initial_dcid = decision.retry_source_cid;
+    }
   }
 
   if (impl->conn == NULL) {
@@ -585,6 +650,14 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
 
   free(staged);
   return AI_QUIC_OK;
+}
+
+ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
+                                                   const uint8_t *datagram,
+                                                   size_t datagram_len,
+                                                   uint64_t now_ms) {
+  return ai_quic_endpoint_receive_datagram_from(
+      endpoint, datagram, datagram_len, NULL, 0u, now_ms);
 }
 
 ai_quic_result_t ai_quic_endpoint_on_timeout(ai_quic_endpoint_t *endpoint,

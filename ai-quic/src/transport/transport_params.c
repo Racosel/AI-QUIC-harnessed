@@ -420,7 +420,9 @@ ai_quic_result_t ai_quic_transport_params_decode(
 ai_quic_result_t ai_quic_transport_params_validate_client(
     const ai_quic_transport_params_t *params,
     const ai_quic_cid_t *original_destination_cid,
-    const ai_quic_cid_t *peer_scid) {
+    const ai_quic_cid_t *peer_scid,
+    const ai_quic_cid_t *retry_source_cid,
+    int retry_accepted) {
   if (params == NULL || original_destination_cid == NULL || peer_scid == NULL) {
     return AI_QUIC_ERROR;
   }
@@ -430,6 +432,14 @@ ai_quic_result_t ai_quic_transport_params_validate_client(
     return AI_QUIC_ERROR;
   }
   if (!ai_quic_cid_equal(&params->initial_source_connection_id, peer_scid)) {
+    return AI_QUIC_ERROR;
+  }
+  if (retry_accepted) {
+    if (retry_source_cid == NULL || !params->has_retry_source_connection_id ||
+        !ai_quic_cid_equal(&params->retry_source_connection_id, retry_source_cid)) {
+      return AI_QUIC_ERROR;
+    }
+  } else if (params->has_retry_source_connection_id) {
     return AI_QUIC_ERROR;
   }
   return AI_QUIC_OK;

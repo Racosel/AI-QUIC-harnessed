@@ -18,10 +18,14 @@
 #define AI_QUIC_MAX_PENDING_DATAGRAMS 4096u
 #define AI_QUIC_MAX_DATAGRAM_SIZE AI_QUIC_MAX_PACKET_SIZE
 #define AI_QUIC_MAX_HTTP_BUFFER_LEN 8192u
+#define AI_QUIC_RETRY_INTEGRITY_TAG_LEN 16u
 #define AI_QUIC_MAX_TRACKED_SENT_PACKETS 2048u
 #define AI_QUIC_MAX_TRACKED_PACKET_STREAM_FRAMES 4u
 #define AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER 0x08u
 #define AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION 0x11u
+#define AI_QUIC_RETRY_TOKEN_KEY_LEN 32u
+#define AI_QUIC_RETRY_TOKEN_MAX_PEER_ADDR_LEN 64u
+#define AI_QUIC_RETRY_TOKEN_LIFETIME_MS 60000u
 
 typedef struct ai_quic_pending_datagram {
   size_t len;
@@ -60,6 +64,18 @@ typedef struct ai_quic_rtt_state {
   uint64_t min_rtt_ms;
   uint64_t max_ack_delay_ms;
 } ai_quic_rtt_state_t;
+
+typedef enum ai_quic_address_validation_source {
+  AI_QUIC_ADDRESS_VALIDATION_NONE = 0,
+  AI_QUIC_ADDRESS_VALIDATION_RETRY_TOKEN = 1,
+  AI_QUIC_ADDRESS_VALIDATION_HANDSHAKE = 2
+} ai_quic_address_validation_source_t;
+
+typedef struct ai_quic_retry_token_metadata {
+  ai_quic_cid_t original_destination_cid;
+  ai_quic_cid_t retry_source_cid;
+  uint64_t expires_at_ms;
+} ai_quic_retry_token_metadata_t;
 
 typedef struct ai_quic_loss_state {
   uint64_t latest_sent_packet;
@@ -100,12 +116,18 @@ typedef struct ai_quic_conn {
   ai_quic_cid_t local_cid;
   ai_quic_cid_t peer_cid;
   ai_quic_cid_t original_destination_cid;
+  ai_quic_cid_t retry_source_cid;
+  ai_quic_cid_t current_initial_dcid;
   ai_quic_transport_params_t local_transport_params;
   ai_quic_transport_params_t peer_transport_params;
   ai_quic_packet_number_space_t packet_spaces[AI_QUIC_PN_SPACE_COUNT];
   ai_quic_stream_manager_t streams;
   ai_quic_flow_controller_t conn_flow;
   ai_quic_tls_session_t *tls_session;
+  ai_quic_tls_ctx_t *tls_ctx;
+  const char *alpn;
+  const char *keylog_path;
+  ai_quic_tls_cipher_policy_t cipher_policy;
   ai_quic_qlog_writer_t *qlog;
   ai_quic_rtt_state_t rtt_state;
   ai_quic_loss_state_t loss_state[AI_QUIC_PN_SPACE_COUNT];
@@ -120,9 +142,12 @@ typedef struct ai_quic_conn {
   int can_send_1rtt;
   int handshake_confirmed;
   int address_validated;
+  ai_quic_address_validation_source_t address_validation_source;
   int peer_transport_params_validated;
   int should_send_handshake_done;
   int saw_first_server_initial;
+  int retry_accepted;
+  int retry_token_validated;
   int compatible_v2_enabled;
   int negotiated_version_learned;
   int peer_version_information_validated;
@@ -130,6 +155,9 @@ typedef struct ai_quic_conn {
   uint64_t close_error_code;
   size_t total_request_streams;
   size_t completed_request_streams;
+  size_t retry_token_len;
+  uint8_t retry_token[AI_QUIC_MAX_TOKEN_LEN];
+  char authority[256];
   char last_error[256];
 } ai_quic_conn_impl_t;
 
@@ -257,7 +285,9 @@ ai_quic_result_t ai_quic_transport_params_decode(
 ai_quic_result_t ai_quic_transport_params_validate_client(
     const ai_quic_transport_params_t *params,
     const ai_quic_cid_t *original_destination_cid,
-    const ai_quic_cid_t *peer_scid);
+    const ai_quic_cid_t *peer_scid,
+    const ai_quic_cid_t *retry_source_cid,
+    int retry_accepted);
 ai_quic_result_t ai_quic_transport_params_validate_server(
     const ai_quic_transport_params_t *params,
     const ai_quic_cid_t *peer_scid);
@@ -332,6 +362,31 @@ ai_quic_result_t ai_quic_build_version_negotiation(
     const ai_quic_dispatcher_t *dispatcher,
     const ai_quic_packet_header_t *incoming,
     ai_quic_packet_t *packet);
+ai_quic_result_t ai_quic_build_retry(const ai_quic_packet_header_t *incoming,
+                                     const ai_quic_cid_t *retry_source_cid,
+                                     const uint8_t *token,
+                                     size_t token_len,
+                                     ai_quic_packet_t *packet);
+
+ai_quic_result_t ai_quic_retry_token_generate(
+    const uint8_t key[AI_QUIC_RETRY_TOKEN_KEY_LEN],
+    const uint8_t *peer_addr,
+    size_t peer_addr_len,
+    const ai_quic_cid_t *original_destination_cid,
+    const ai_quic_cid_t *retry_source_cid,
+    uint64_t now_ms,
+    uint8_t *token,
+    size_t capacity,
+    size_t *token_len);
+ai_quic_result_t ai_quic_retry_token_validate(
+    const uint8_t key[AI_QUIC_RETRY_TOKEN_KEY_LEN],
+    const uint8_t *token,
+    size_t token_len,
+    const uint8_t *peer_addr,
+    size_t peer_addr_len,
+    const ai_quic_cid_t *packet_dcid,
+    uint64_t now_ms,
+    ai_quic_retry_token_metadata_t *metadata);
 
 ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
                                              ai_quic_tls_ctx_t *tls_ctx,

@@ -48,6 +48,9 @@ static ai_quic_result_t ai_quic_conn_fail_with_transport_error(
     ai_quic_conn_impl_t *conn,
     uint64_t error_code,
     const char *reason);
+static ai_quic_result_t ai_quic_conn_restart_client_after_retry(
+    ai_quic_conn_impl_t *conn,
+    const ai_quic_packet_t *packet);
 
 static const char *ai_quic_qlog_packet_type_name(ai_quic_packet_type_t type) {
   switch (type) {
@@ -55,6 +58,8 @@ static const char *ai_quic_qlog_packet_type_name(ai_quic_packet_type_t type) {
       return "initial";
     case AI_QUIC_PACKET_TYPE_HANDSHAKE:
       return "handshake";
+    case AI_QUIC_PACKET_TYPE_RETRY:
+      return "retry";
     case AI_QUIC_PACKET_TYPE_ONE_RTT:
       return "1rtt";
     case AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION:
@@ -596,6 +601,7 @@ static ai_quic_packet_number_space_id_t ai_quic_packet_type_to_space(
     ai_quic_packet_type_t type) {
   switch (type) {
     case AI_QUIC_PACKET_TYPE_INITIAL:
+    case AI_QUIC_PACKET_TYPE_RETRY:
       return AI_QUIC_PN_SPACE_INITIAL;
     case AI_QUIC_PACKET_TYPE_HANDSHAKE:
       return AI_QUIC_PN_SPACE_HANDSHAKE;
@@ -650,7 +656,10 @@ static ai_quic_result_t ai_quic_conn_build_crypto_packet(
   packet->frame_count = frame_index;
 
   if (type == AI_QUIC_PACKET_TYPE_INITIAL) {
-    packet->header.token_len = 0u;
+    packet->header.token_len = conn->retry_token_len;
+    if (conn->retry_token_len > 0u) {
+      memcpy(packet->header.token, conn->retry_token, conn->retry_token_len);
+    }
   }
   if (!conn->is_server && type == AI_QUIC_PACKET_TYPE_HANDSHAKE &&
       ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_INITIAL)->key_state ==
@@ -695,7 +704,10 @@ static ai_quic_result_t ai_quic_conn_build_ack_packet(
   ai_quic_build_ack_frame(space, &packet->frames[0]);
   packet->frame_count = 1u;
   if (type == AI_QUIC_PACKET_TYPE_INITIAL) {
-    packet->header.token_len = 0u;
+    packet->header.token_len = conn->retry_token_len;
+    if (conn->retry_token_len > 0u) {
+      memcpy(packet->header.token, conn->retry_token, conn->retry_token_len);
+    }
   }
   space->ack_needed = 0;
   return AI_QUIC_OK;
@@ -1796,6 +1808,100 @@ ai_quic_result_t ai_quic_conn_flush_pending(ai_quic_conn_impl_t *conn,
   return AI_QUIC_OK;
 }
 
+static void ai_quic_conn_reset_handshake_state(ai_quic_conn_impl_t *conn,
+                                               int preserve_initial_next_pn) {
+  size_t i;
+  uint64_t initial_next_packet_number;
+
+  if (conn == NULL) {
+    return;
+  }
+
+  initial_next_packet_number =
+      preserve_initial_next_pn
+          ? conn->packet_spaces[AI_QUIC_PN_SPACE_INITIAL].next_packet_number
+          : 0u;
+
+  conn->state = AI_QUIC_CONN_STATE_HANDSHAKING;
+  conn->handshake_completed = 0;
+  conn->can_send_1rtt = 0;
+  conn->handshake_confirmed = 0;
+  conn->address_validated = 0;
+  conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_NONE;
+  conn->peer_transport_params_validated = 0;
+  conn->should_send_handshake_done = 0;
+  conn->saw_first_server_initial = 0;
+  conn->close_error_code_set = 0;
+  conn->close_error_code = 0u;
+  conn->retry_token_validated = 0;
+  ai_quic_transport_params_init(&conn->peer_transport_params);
+  ai_quic_flow_controller_init(&conn->conn_flow, conn->local_transport_params.initial_max_data);
+  conn->conn_flow.recv_limit = conn->local_transport_params.initial_max_data;
+  ai_quic_flow_controller_set_send_limit(&conn->conn_flow,
+                                         conn->peer_transport_params.initial_max_data);
+  for (i = 0; i < AI_QUIC_PN_SPACE_COUNT; ++i) {
+    ai_quic_pn_space_init(&conn->packet_spaces[i], (ai_quic_packet_number_space_id_t)i);
+    ai_quic_loss_state_init(&conn->loss_state[i]);
+  }
+  if (preserve_initial_next_pn) {
+    conn->packet_spaces[AI_QUIC_PN_SPACE_INITIAL].next_packet_number =
+        initial_next_packet_number;
+  }
+  ai_quic_pn_space_mark_key_installed(ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_INITIAL));
+}
+
+static ai_quic_result_t ai_quic_conn_restart_client_after_retry(
+    ai_quic_conn_impl_t *conn,
+    const ai_quic_packet_t *packet) {
+  if (conn == NULL || packet == NULL || conn->is_server ||
+      packet->header.type != AI_QUIC_PACKET_TYPE_RETRY ||
+      packet->header.token_len == 0u || packet->header.scid.len == 0u ||
+      !ai_quic_cid_equal(&packet->header.dcid, &conn->local_cid)) {
+    return AI_QUIC_ERROR;
+  }
+
+  conn->retry_source_cid = packet->header.scid;
+  conn->current_initial_dcid = packet->header.scid;
+  conn->peer_cid = packet->header.scid;
+  conn->retry_accepted = 1;
+  conn->retry_token_len = packet->header.token_len;
+  memcpy(conn->retry_token, packet->header.token, packet->header.token_len);
+  conn->local_transport_params.initial_source_connection_id = conn->local_cid;
+  conn->local_transport_params.has_original_destination_connection_id = 0;
+  conn->local_transport_params.has_retry_source_connection_id = 0;
+  ai_quic_conn_seed_version_information(conn);
+  ai_quic_conn_reset_handshake_state(conn, 1);
+
+  if (ai_quic_conn_init_transport(conn,
+                                  conn->tls_ctx,
+                                  conn->qlog,
+                                  conn->alpn,
+                                  conn->keylog_path,
+                                  conn->cipher_policy) != AI_QUIC_OK ||
+      ai_quic_tls_session_start(conn->tls_session,
+                                &conn->local_transport_params,
+                                conn->authority[0] != '\0' ? conn->authority : NULL) !=
+          AI_QUIC_OK) {
+    ai_quic_set_error(conn->last_error, sizeof(conn->last_error), "%s",
+                      "client retry restart failed");
+    return AI_QUIC_ERROR;
+  }
+
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "conn_io",
+                    "accepted retry version=0x%08x retry_scid_len=%zu token_len=%zu",
+                    (unsigned)packet->header.version,
+                    packet->header.scid.len,
+                    packet->header.token_len);
+  ai_quic_qlog_write_key_value(conn->qlog,
+                               ai_quic_now_ms(),
+                               "transport",
+                               "retry_received",
+                               "retry_scid_len",
+                               "present");
+  return AI_QUIC_OK;
+}
+
 ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
                                              ai_quic_tls_ctx_t *tls_ctx,
                                              ai_quic_qlog_writer_t *qlog,
@@ -1806,7 +1912,13 @@ ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
     return AI_QUIC_ERROR;
   }
 
+  ai_quic_tls_session_destroy(conn->tls_session);
+  conn->tls_session = NULL;
   conn->qlog = qlog;
+  conn->tls_ctx = tls_ctx;
+  conn->alpn = alpn;
+  conn->keylog_path = keylog_path;
+  conn->cipher_policy = cipher_policy;
   conn->tls_session = ai_quic_tls_session_create(
       tls_ctx, conn->is_server, alpn, keylog_path, cipher_policy);
   if (conn->tls_session == NULL) {
@@ -1832,15 +1944,27 @@ ai_quic_result_t ai_quic_conn_start_client(ai_quic_conn_impl_t *conn,
     return AI_QUIC_ERROR;
   }
 
+  conn->current_initial_dcid = conn->original_destination_cid;
+  ai_quic_cid_clear(&conn->retry_source_cid);
+  conn->retry_accepted = 0;
+  conn->retry_token_len = 0u;
+  conn->retry_token_validated = 0;
+  conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_NONE;
   conn->state = AI_QUIC_CONN_STATE_HANDSHAKING;
   conn->local_transport_params.initial_source_connection_id = conn->local_cid;
   conn->local_transport_params.has_original_destination_connection_id = 0;
+  conn->local_transport_params.has_retry_source_connection_id = 0;
   ai_quic_conn_seed_version_information(conn);
   ai_quic_pn_space_mark_key_installed(ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_INITIAL));
   conn->conn_flow.initial_window = conn->local_transport_params.initial_max_data;
   conn->conn_flow.recv_limit = conn->local_transport_params.initial_max_data;
   ai_quic_flow_controller_set_send_limit(&conn->conn_flow,
                                          conn->peer_transport_params.initial_max_data);
+  if (authority != NULL) {
+    ai_quic_set_error(conn->authority, sizeof(conn->authority), "%s", authority);
+  } else {
+    conn->authority[0] = '\0';
+  }
 
   memcpy(seed, conn->original_destination_cid.bytes, conn->original_destination_cid.len);
   ai_quic_qlog_write_key_value(conn->qlog,
@@ -1949,7 +2073,9 @@ static ai_quic_result_t ai_quic_conn_on_crypto(ai_quic_conn_impl_t *conn,
       !conn->peer_transport_params_validated) {
     if (ai_quic_transport_params_validate_client(&conn->peer_transport_params,
                                                  &conn->original_destination_cid,
-                                                 &packet->header.scid) != AI_QUIC_OK) {
+                                                 &packet->header.scid,
+                                                 &conn->retry_source_cid,
+                                                 conn->retry_accepted) != AI_QUIC_OK) {
       return ai_quic_conn_fail_with_transport_error(
           conn,
           AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER,
@@ -2076,6 +2202,20 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
   conn->bytes_received += packet->header.packet_length;
   conn->last_activity_ms = now_ms;
 
+  if (!conn->is_server && packet->header.type == AI_QUIC_PACKET_TYPE_RETRY) {
+    if (conn->retry_accepted || conn->saw_first_server_initial ||
+        packet->header.version != conn->version) {
+      return ai_quic_conn_fail_with_transport_error(
+          conn,
+          AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER,
+          "unexpected retry packet");
+    }
+    return ai_quic_conn_restart_client_after_retry(conn, packet);
+  }
+  if (conn->is_server && packet->header.type == AI_QUIC_PACKET_TYPE_RETRY) {
+    return AI_QUIC_OK;
+  }
+
   if (!conn->is_server && packet->header.type == AI_QUIC_PACKET_TYPE_INITIAL &&
       !conn->saw_first_server_initial) {
     conn->peer_cid = packet->header.scid;
@@ -2103,8 +2243,26 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
     conn->original_version = packet->header.version;
     conn->negotiated_version = packet->header.version;
     conn->peer_cid = packet->header.scid;
-    conn->original_destination_cid = packet->header.dcid;
-    ai_quic_random_cid(&conn->local_cid, 8u);
+    if (conn->retry_token_validated) {
+      if (!ai_quic_cid_equal(&packet->header.dcid, &conn->retry_source_cid)) {
+        return ai_quic_conn_fail_with_transport_error(
+            conn,
+            AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER,
+            "retry dcid mismatch");
+      }
+      conn->local_cid = conn->retry_source_cid;
+      conn->current_initial_dcid = conn->retry_source_cid;
+      conn->address_validated = 1;
+      conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_RETRY_TOKEN;
+      conn->local_transport_params.retry_source_connection_id = conn->retry_source_cid;
+      conn->local_transport_params.has_retry_source_connection_id = 1;
+    } else {
+      conn->original_destination_cid = packet->header.dcid;
+      conn->current_initial_dcid = packet->header.dcid;
+      ai_quic_random_cid(&conn->local_cid, 8u);
+      ai_quic_cid_clear(&conn->retry_source_cid);
+      conn->local_transport_params.has_retry_source_connection_id = 0;
+    }
     conn->local_transport_params.initial_source_connection_id = conn->local_cid;
     conn->local_transport_params.original_destination_connection_id =
         conn->original_destination_cid;
@@ -2173,6 +2331,7 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
       case AI_QUIC_FRAME_HANDSHAKE_DONE:
         conn->handshake_confirmed = 1;
         conn->address_validated = 1;
+        conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_HANDSHAKE;
         conn->state = AI_QUIC_CONN_STATE_ACTIVE;
         ai_quic_loss_discard_space(conn, AI_QUIC_PN_SPACE_HANDSHAKE);
         ai_quic_qlog_write_key_value(conn->qlog,
@@ -2261,6 +2420,9 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
 
   if (conn->is_server && packet->header.type == AI_QUIC_PACKET_TYPE_HANDSHAKE) {
     conn->address_validated = 1;
+    if (conn->address_validation_source == AI_QUIC_ADDRESS_VALIDATION_NONE) {
+      conn->address_validation_source = AI_QUIC_ADDRESS_VALIDATION_HANDSHAKE;
+    }
     conn->can_send_1rtt = 1;
     conn->handshake_completed = ai_quic_tls_session_handshake_complete(conn->tls_session);
     conn->should_send_handshake_done = conn->handshake_completed;

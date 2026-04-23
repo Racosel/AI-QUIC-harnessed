@@ -277,8 +277,8 @@ static int test_transport_params_validation(void) {
                                                  sizeof(encoded),
                                                  &written) == AI_QUIC_OK);
   AI_QUIC_ASSERT(ai_quic_transport_params_decode(encoded, written, &decoded) == AI_QUIC_OK);
-  AI_QUIC_ASSERT(ai_quic_transport_params_validate_client(&decoded, &original, &peer) ==
-                 AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_client(
+                     &decoded, &original, &peer, NULL, 0) == AI_QUIC_OK);
   AI_QUIC_ASSERT(ai_quic_transport_params_validate_server(&decoded, &peer) ==
                  AI_QUIC_OK);
   AI_QUIC_ASSERT(decoded.version_information.present);
@@ -286,6 +286,216 @@ static int test_transport_params_validation(void) {
   AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions_len, 2u);
   AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions[0], AI_QUIC_VERSION_V2);
   AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions[1], AI_QUIC_VERSION_V1);
+  return 0;
+}
+
+static int test_retry_token_service(void) {
+  uint8_t key[AI_QUIC_RETRY_TOKEN_KEY_LEN];
+  uint8_t token[AI_QUIC_MAX_TOKEN_LEN];
+  size_t token_len;
+  ai_quic_cid_t original;
+  ai_quic_cid_t retry_scid;
+  ai_quic_retry_token_metadata_t metadata;
+
+  memset(key, 0x5au, sizeof(key));
+  AI_QUIC_ASSERT(ai_quic_random_cid(&original, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&retry_scid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_retry_token_generate(key,
+                                              (const uint8_t *)"client-addr",
+                                              11u,
+                                              &original,
+                                              &retry_scid,
+                                              100u,
+                                              token,
+                                              sizeof(token),
+                                              &token_len) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_retry_token_validate(key,
+                                              token,
+                                              token_len,
+                                              (const uint8_t *)"client-addr",
+                                              11u,
+                                              &retry_scid,
+                                              100u,
+                                              &metadata) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_cid_equal(&metadata.original_destination_cid, &original));
+  AI_QUIC_ASSERT(ai_quic_cid_equal(&metadata.retry_source_cid, &retry_scid));
+  AI_QUIC_ASSERT(ai_quic_retry_token_validate(key,
+                                              token,
+                                              token_len,
+                                              (const uint8_t *)"other-addr",
+                                              10u,
+                                              &retry_scid,
+                                              100u,
+                                              NULL) == AI_QUIC_ERROR);
+  AI_QUIC_ASSERT(ai_quic_retry_token_validate(key,
+                                              token,
+                                              token_len,
+                                              (const uint8_t *)"client-addr",
+                                              11u,
+                                              &retry_scid,
+                                              100u + AI_QUIC_RETRY_TOKEN_LIFETIME_MS + 1u,
+                                              NULL) == AI_QUIC_ERROR);
+  return 0;
+}
+
+static int test_retry_packet_roundtrip_and_integrity(void) {
+  ai_quic_packet_header_t incoming;
+  ai_quic_packet_t retry_packet;
+  ai_quic_packet_t decoded;
+  ai_quic_conn_impl_t *client;
+  ai_quic_cid_t retry_scid;
+  uint8_t datagram[AI_QUIC_MAX_PACKET_SIZE];
+  uint8_t tampered[AI_QUIC_MAX_PACKET_SIZE];
+  size_t written;
+  size_t consumed;
+  static const uint8_t kToken[] = {0x10u, 0x20u, 0x30u, 0x40u};
+
+  memset(&incoming, 0, sizeof(incoming));
+  incoming.type = AI_QUIC_PACKET_TYPE_INITIAL;
+  incoming.version = AI_QUIC_VERSION_V1;
+  AI_QUIC_ASSERT(ai_quic_random_cid(&incoming.dcid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&incoming.scid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&retry_scid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_build_retry(&incoming,
+                                     &retry_scid,
+                                     kToken,
+                                     sizeof(kToken),
+                                     &retry_packet) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&retry_packet, datagram, sizeof(datagram), &written) ==
+                 AI_QUIC_OK);
+
+  client = (ai_quic_conn_impl_t *)ai_quic_conn_create(AI_QUIC_VERSION_V1, 0);
+  AI_QUIC_ASSERT(client != NULL);
+  client->version = AI_QUIC_VERSION_V1;
+  client->current_initial_dcid = incoming.dcid;
+  client->local_cid = incoming.scid;
+  client->peer_cid = incoming.dcid;
+  AI_QUIC_ASSERT(ai_quic_packet_decode_conn(client, datagram, written, &consumed, &decoded) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(consumed, written);
+  AI_QUIC_ASSERT_EQ(decoded.header.type, AI_QUIC_PACKET_TYPE_RETRY);
+  AI_QUIC_ASSERT(ai_quic_cid_equal(&decoded.header.dcid, &incoming.scid));
+  AI_QUIC_ASSERT(ai_quic_cid_equal(&decoded.header.scid, &retry_scid));
+  AI_QUIC_ASSERT_EQ(decoded.header.token_len, sizeof(kToken));
+  AI_QUIC_ASSERT(memcmp(decoded.header.token, kToken, sizeof(kToken)) == 0);
+
+  memcpy(tampered, datagram, written);
+  tampered[written - 1u] ^= 0x01u;
+  AI_QUIC_ASSERT(ai_quic_packet_decode_conn(client, tampered, written, &consumed, &decoded) ==
+                 AI_QUIC_ERROR);
+  ai_quic_conn_destroy((ai_quic_conn_t *)client);
+  return 0;
+}
+
+static int test_client_retry_keeps_initial_packet_number(void) {
+  ai_quic_endpoint_config_t config;
+  ai_quic_endpoint_t *endpoint;
+  ai_quic_endpoint_impl_t *impl;
+  ai_quic_packet_header_t incoming;
+  ai_quic_packet_t retry_packet;
+  ai_quic_cid_t retry_scid;
+  uint8_t initial_datagram[AI_QUIC_MAX_PACKET_SIZE];
+  uint8_t retry_datagram[AI_QUIC_MAX_PACKET_SIZE];
+  size_t written;
+  static const uint8_t kToken[] = {0xa1u, 0xb2u, 0xc3u, 0xd4u};
+
+  ai_quic_endpoint_config_init(&config, AI_QUIC_ENDPOINT_ROLE_CLIENT);
+  config.qlog_path = "/tmp/ai_quic_unit_retry_keep_pn.qlog";
+  endpoint = ai_quic_endpoint_create(&config);
+  AI_QUIC_ASSERT(endpoint != NULL);
+  AI_QUIC_ASSERT(ai_quic_endpoint_start_client(endpoint, "server4:443", "/file.bin") ==
+                 AI_QUIC_OK);
+  impl = (ai_quic_endpoint_impl_t *)endpoint;
+  AI_QUIC_ASSERT(impl != NULL && impl->conn != NULL);
+  AI_QUIC_ASSERT_EQ(
+      impl->conn->packet_spaces[AI_QUIC_PN_SPACE_INITIAL].next_packet_number, 1u);
+  AI_QUIC_ASSERT(ai_quic_endpoint_pop_datagram(
+                     endpoint, initial_datagram, sizeof(initial_datagram), &written) ==
+                 AI_QUIC_OK);
+
+  memset(&incoming, 0, sizeof(incoming));
+  incoming.type = AI_QUIC_PACKET_TYPE_INITIAL;
+  incoming.version = impl->conn->version;
+  incoming.dcid = impl->conn->current_initial_dcid;
+  incoming.scid = impl->conn->local_cid;
+  AI_QUIC_ASSERT(ai_quic_random_cid(&retry_scid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_build_retry(&incoming,
+                                     &retry_scid,
+                                     kToken,
+                                     sizeof(kToken),
+                                     &retry_packet) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&retry_packet,
+                                       retry_datagram,
+                                       sizeof(retry_datagram),
+                                       &written) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_endpoint_receive_datagram_from(endpoint,
+                                                        retry_datagram,
+                                                        written,
+                                                        (const uint8_t *)"server-addr",
+                                                        11u,
+                                                        1u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(
+      impl->conn->packet_spaces[AI_QUIC_PN_SPACE_INITIAL].next_packet_number, 2u);
+
+  ai_quic_endpoint_destroy(endpoint);
+  return 0;
+}
+
+static int test_dispatcher_retry_decision(void) {
+  ai_quic_dispatcher_t *dispatcher;
+  ai_quic_dispatch_decision_t decision;
+  ai_quic_packet_t initial;
+  uint8_t datagram[AI_QUIC_MAX_PACKET_SIZE];
+  size_t written;
+
+  dispatcher = ai_quic_dispatcher_create();
+  AI_QUIC_ASSERT(dispatcher != NULL);
+  ai_quic_dispatcher_set_retry_enabled(dispatcher, 1);
+
+  memset(&initial, 0, sizeof(initial));
+  initial.header.type = AI_QUIC_PACKET_TYPE_INITIAL;
+  initial.header.version = AI_QUIC_VERSION_V1;
+  AI_QUIC_ASSERT(ai_quic_random_cid(&initial.header.dcid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&initial.header.scid, 8u) == AI_QUIC_OK);
+  initial.frames[0].type = AI_QUIC_FRAME_PADDING;
+  initial.frame_count = 1u;
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&initial, datagram, sizeof(datagram), &written) ==
+                 AI_QUIC_OK);
+
+  AI_QUIC_ASSERT(ai_quic_dispatcher_route_datagram_from(dispatcher,
+                                                        datagram,
+                                                        written,
+                                                        (const uint8_t *)"client-addr",
+                                                        11u,
+                                                        50u,
+                                                        &decision));
+  AI_QUIC_ASSERT_EQ(decision.action, AI_QUIC_DISPATCH_SEND_RETRY);
+  AI_QUIC_ASSERT(decision.retry_token_len > 0u);
+
+  initial.header.dcid = decision.retry_source_cid;
+  memcpy(initial.header.token, decision.retry_token, decision.retry_token_len);
+  initial.header.token_len = decision.retry_token_len;
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&initial, datagram, sizeof(datagram), &written) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_dispatcher_route_datagram_from(dispatcher,
+                                                        datagram,
+                                                        written,
+                                                        (const uint8_t *)"client-addr",
+                                                        11u,
+                                                        60u,
+                                                        &decision));
+  AI_QUIC_ASSERT_EQ(decision.action, AI_QUIC_DISPATCH_CREATE_CONN);
+  AI_QUIC_ASSERT(decision.token_valid);
+  AI_QUIC_ASSERT(ai_quic_dispatcher_route_datagram_from(dispatcher,
+                                                        datagram,
+                                                        written,
+                                                        (const uint8_t *)"other-addr",
+                                                        10u,
+                                                        60u,
+                                                        &decision));
+  AI_QUIC_ASSERT_EQ(decision.action, AI_QUIC_DISPATCH_DROP);
+
+  ai_quic_dispatcher_destroy(dispatcher);
   return 0;
 }
 
@@ -974,6 +1184,10 @@ int main(void) {
   AI_QUIC_ASSERT(test_qlog_json_seq_survives_early_read() == 0);
   AI_QUIC_ASSERT(test_pn_spaces_independent() == 0);
   AI_QUIC_ASSERT(test_transport_params_validation() == 0);
+  AI_QUIC_ASSERT(test_retry_token_service() == 0);
+  AI_QUIC_ASSERT(test_retry_packet_roundtrip_and_integrity() == 0);
+  AI_QUIC_ASSERT(test_client_retry_keeps_initial_packet_number() == 0);
+  AI_QUIC_ASSERT(test_dispatcher_retry_decision() == 0);
   AI_QUIC_ASSERT(test_transport_params_reject_malformed_version_information() == 0);
   AI_QUIC_ASSERT(test_version_catalog_v2_retry_and_reserved() == 0);
   AI_QUIC_ASSERT(test_version_information_error_code_split() == 0);

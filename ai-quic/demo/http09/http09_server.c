@@ -390,10 +390,12 @@ int ai_quic_demo_run_server(const ai_quic_demo_options_t *options) {
                         peer_text,
                         preview);
 
-      if (ai_quic_endpoint_receive_datagram(endpoint,
-                                            buffer,
-                                            (size_t)received,
-                                            ai_quic_now_ms()) != AI_QUIC_OK) {
+      if (ai_quic_endpoint_receive_datagram_from(endpoint,
+                                                 buffer,
+                                                 (size_t)received,
+                                                 (const uint8_t *)&peer_addr,
+                                                 (size_t)peer_addr_len,
+                                                 ai_quic_now_ms()) != AI_QUIC_OK) {
         ai_quic_log_write(AI_QUIC_LOG_ERROR,
                           "demo_server",
                           "endpoint receive failed: %s",

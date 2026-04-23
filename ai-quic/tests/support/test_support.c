@@ -20,10 +20,14 @@ int ai_quic_fake_link_init(ai_quic_fake_link_t *link,
 static int ai_quic_fake_link_step(ai_quic_endpoint_t *from,
                                   ai_quic_endpoint_t *to,
                                   uint64_t now_ms) {
+  static const uint8_t kClientAddr[] = "client-addr";
+  static const uint8_t kServerAddr[] = "server-addr";
   ai_quic_endpoint_impl_t *from_impl;
   ai_quic_endpoint_impl_t *to_impl;
   uint8_t buffer[AI_QUIC_MAX_PACKET_SIZE];
   size_t written;
+  const uint8_t *peer_addr;
+  size_t peer_addr_len;
 
   from_impl = (ai_quic_endpoint_impl_t *)from;
   to_impl = (ai_quic_endpoint_impl_t *)to;
@@ -31,9 +35,19 @@ static int ai_quic_fake_link_step(ai_quic_endpoint_t *from,
     return 0;
   }
 
+  if (from_impl != NULL &&
+      from_impl->config.role == AI_QUIC_ENDPOINT_ROLE_CLIENT) {
+    peer_addr = kClientAddr;
+    peer_addr_len = sizeof(kClientAddr) - 1u;
+  } else {
+    peer_addr = kServerAddr;
+    peer_addr_len = sizeof(kServerAddr) - 1u;
+  }
+
   if (ai_quic_endpoint_pop_datagram(from, buffer, sizeof(buffer), &written) !=
           AI_QUIC_OK ||
-      ai_quic_endpoint_receive_datagram(to, buffer, written, now_ms) != AI_QUIC_OK) {
+      ai_quic_endpoint_receive_datagram_from(
+          to, buffer, written, peer_addr, peer_addr_len, now_ms) != AI_QUIC_OK) {
     fprintf(stderr,
             "fake_link_step failed: from=%s to=%s from_pending=%zu to_pending=%zu written=%zu\n",
             ai_quic_endpoint_error(from),

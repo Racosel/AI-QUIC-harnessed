@@ -78,6 +78,87 @@ static ai_quic_result_t ai_quic_encode_frames(const ai_quic_packet_t *packet,
   return AI_QUIC_OK;
 }
 
+static ai_quic_result_t ai_quic_packet_compute_retry_integrity_tag(
+    ai_quic_version_t version,
+    const ai_quic_cid_t *original_dcid,
+    const uint8_t *retry_without_tag,
+    size_t retry_without_tag_len,
+    uint8_t tag[AI_QUIC_RETRY_INTEGRITY_TAG_LEN]) {
+  const ai_quic_version_ops_t *ops;
+  EVP_AEAD_CTX ctx;
+  uint8_t pseudo_packet[1u + AI_QUIC_MAX_CID_LEN + AI_QUIC_MAX_PACKET_SIZE];
+  size_t pseudo_len;
+  size_t ciphertext_len;
+
+  if (original_dcid == NULL || original_dcid->len == 0u || retry_without_tag == NULL ||
+      tag == NULL || retry_without_tag_len > AI_QUIC_MAX_PACKET_SIZE ||
+      retry_without_tag_len + 1u + original_dcid->len > sizeof(pseudo_packet)) {
+    return AI_QUIC_ERROR;
+  }
+
+  ops = ai_quic_version_ops_find(version);
+  if (ops == NULL) {
+    return AI_QUIC_ERROR;
+  }
+
+  pseudo_len = 0u;
+  pseudo_packet[pseudo_len++] = (uint8_t)original_dcid->len;
+  memcpy(pseudo_packet + pseudo_len, original_dcid->bytes, original_dcid->len);
+  pseudo_len += original_dcid->len;
+  memcpy(pseudo_packet + pseudo_len, retry_without_tag, retry_without_tag_len);
+  pseudo_len += retry_without_tag_len;
+
+  EVP_AEAD_CTX_zero(&ctx);
+  if (!EVP_AEAD_CTX_init(&ctx,
+                         EVP_aead_aes_128_gcm(),
+                         ops->retry_integrity_key,
+                         sizeof(ops->retry_integrity_key),
+                         AI_QUIC_RETRY_INTEGRITY_TAG_LEN,
+                         NULL)) {
+    return AI_QUIC_ERROR;
+  }
+  if (!EVP_AEAD_CTX_seal(&ctx,
+                         tag,
+                         &ciphertext_len,
+                         AI_QUIC_RETRY_INTEGRITY_TAG_LEN,
+                         ops->retry_integrity_nonce,
+                         sizeof(ops->retry_integrity_nonce),
+                         NULL,
+                         0u,
+                         pseudo_packet,
+                         pseudo_len)) {
+    EVP_AEAD_CTX_cleanup(&ctx);
+    return AI_QUIC_ERROR;
+  }
+  EVP_AEAD_CTX_cleanup(&ctx);
+  return ciphertext_len == AI_QUIC_RETRY_INTEGRITY_TAG_LEN ? AI_QUIC_OK : AI_QUIC_ERROR;
+}
+
+static ai_quic_result_t ai_quic_packet_verify_retry_integrity_tag(
+    ai_quic_version_t version,
+    const ai_quic_cid_t *original_dcid,
+    const uint8_t *retry_packet,
+    size_t retry_packet_len) {
+  uint8_t expected_tag[AI_QUIC_RETRY_INTEGRITY_TAG_LEN];
+
+  if (retry_packet == NULL || retry_packet_len < AI_QUIC_RETRY_INTEGRITY_TAG_LEN) {
+    return AI_QUIC_ERROR;
+  }
+  if (ai_quic_packet_compute_retry_integrity_tag(version,
+                                                 original_dcid,
+                                                 retry_packet,
+                                                 retry_packet_len -
+                                                     AI_QUIC_RETRY_INTEGRITY_TAG_LEN,
+                                                 expected_tag) != AI_QUIC_OK) {
+    return AI_QUIC_ERROR;
+  }
+  return memcmp(expected_tag,
+                retry_packet + retry_packet_len - AI_QUIC_RETRY_INTEGRITY_TAG_LEN,
+                AI_QUIC_RETRY_INTEGRITY_TAG_LEN) == 0
+             ? AI_QUIC_OK
+             : AI_QUIC_ERROR;
+}
+
 ai_quic_result_t ai_quic_packet_encode(const ai_quic_packet_t *packet,
                                        uint8_t *buffer,
                                        size_t capacity,
@@ -119,6 +200,48 @@ ai_quic_result_t ai_quic_packet_encode(const ai_quic_packet_t *packet,
       }
       offset += chunk;
     }
+    *written = offset;
+    return AI_QUIC_OK;
+  }
+
+  if (packet->header.type == AI_QUIC_PACKET_TYPE_RETRY) {
+    uint8_t tag[AI_QUIC_RETRY_INTEGRITY_TAG_LEN];
+
+    if (capacity < 7u + packet->header.dcid.len + packet->header.scid.len +
+                       packet->header.token_len + AI_QUIC_RETRY_INTEGRITY_TAG_LEN) {
+      return AI_QUIC_ERROR;
+    }
+    if (ai_quic_version_encode_long_header_first_byte(packet->header.version,
+                                                      packet->header.type,
+                                                      1u,
+                                                      &buffer[offset]) != AI_QUIC_OK) {
+      return AI_QUIC_ERROR;
+    }
+    offset += 1u;
+    if (ai_quic_write_u32(buffer + offset,
+                          capacity - offset,
+                          &chunk,
+                          packet->header.version) != AI_QUIC_OK) {
+      return AI_QUIC_ERROR;
+    }
+    offset += chunk;
+    buffer[offset++] = (uint8_t)packet->header.dcid.len;
+    memcpy(buffer + offset, packet->header.dcid.bytes, packet->header.dcid.len);
+    offset += packet->header.dcid.len;
+    buffer[offset++] = (uint8_t)packet->header.scid.len;
+    memcpy(buffer + offset, packet->header.scid.bytes, packet->header.scid.len);
+    offset += packet->header.scid.len;
+    memcpy(buffer + offset, packet->header.token, packet->header.token_len);
+    offset += packet->header.token_len;
+    if (ai_quic_packet_compute_retry_integrity_tag(packet->header.version,
+                                                   &packet->header.retry_original_dcid,
+                                                   buffer,
+                                                   offset,
+                                                   tag) != AI_QUIC_OK) {
+      return AI_QUIC_ERROR;
+    }
+    memcpy(buffer + offset, tag, sizeof(tag));
+    offset += sizeof(tag);
     *written = offset;
     return AI_QUIC_OK;
   }
@@ -360,6 +483,24 @@ ai_quic_result_t ai_quic_packet_decode(const uint8_t *buffer,
     return AI_QUIC_OK;
   }
 
+  if (packet->header.type == AI_QUIC_PACKET_TYPE_RETRY) {
+    if (buffer_len < offset + AI_QUIC_RETRY_INTEGRITY_TAG_LEN) {
+      ai_quic_packet_decode_set_error("%s", "retry packet missing integrity tag");
+      return AI_QUIC_ERROR;
+    }
+    packet->header.token_len =
+        buffer_len - offset - AI_QUIC_RETRY_INTEGRITY_TAG_LEN;
+    if (packet->header.token_len > sizeof(packet->header.token)) {
+      ai_quic_packet_decode_set_error("%s", "retry token exceeds buffer");
+      return AI_QUIC_ERROR;
+    }
+    memcpy(packet->header.token, buffer + offset, packet->header.token_len);
+    offset += packet->header.token_len + AI_QUIC_RETRY_INTEGRITY_TAG_LEN;
+    packet->header.packet_length = offset;
+    *consumed = offset;
+    return AI_QUIC_OK;
+  }
+
   if (packet->header.type == AI_QUIC_PACKET_TYPE_INITIAL) {
     if (ai_quic_varint_read(buffer + offset,
                             buffer_len - offset,
@@ -447,6 +588,7 @@ static ai_quic_packet_number_space_id_t ai_quic_packet_type_to_space(
     ai_quic_packet_type_t type) {
   switch (type) {
     case AI_QUIC_PACKET_TYPE_INITIAL:
+    case AI_QUIC_PACKET_TYPE_RETRY:
       return AI_QUIC_PN_SPACE_INITIAL;
     case AI_QUIC_PACKET_TYPE_HANDSHAKE:
       return AI_QUIC_PN_SPACE_HANDSHAKE;
@@ -460,6 +602,7 @@ static ai_quic_encryption_level_t ai_quic_packet_type_to_level(
     ai_quic_packet_type_t type) {
   switch (type) {
     case AI_QUIC_PACKET_TYPE_INITIAL:
+    case AI_QUIC_PACKET_TYPE_RETRY:
       return AI_QUIC_ENCRYPTION_INITIAL;
     case AI_QUIC_PACKET_TYPE_HANDSHAKE:
       return AI_QUIC_ENCRYPTION_HANDSHAKE;
@@ -616,7 +759,9 @@ static ai_quic_result_t ai_quic_build_packet_protection(
     int want_server_secret;
 
     memset(&secret_dcid, 0, sizeof(secret_dcid));
-    if (conn->original_destination_cid.len > 0u) {
+    if (conn->current_initial_dcid.len > 0u) {
+      secret_dcid = conn->current_initial_dcid;
+    } else if (conn->original_destination_cid.len > 0u) {
       secret_dcid = conn->original_destination_cid;
     } else if (initial_dcid != NULL) {
       secret_dcid = *initial_dcid;
@@ -1014,7 +1159,8 @@ ai_quic_result_t ai_quic_packet_encode_conn(ai_quic_conn_impl_t *conn,
     ai_quic_packet_encode_set_error("%s", "invalid protected encode arguments");
     return AI_QUIC_ERROR;
   }
-  if (packet->header.type == AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION) {
+  if (packet->header.type == AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION ||
+      packet->header.type == AI_QUIC_PACKET_TYPE_RETRY) {
     return ai_quic_packet_encode(packet, buffer, capacity, written);
   }
   if (packet->header.type == AI_QUIC_PACKET_TYPE_ONE_RTT) {
@@ -1313,6 +1459,23 @@ ai_quic_result_t ai_quic_packet_decode_conn(ai_quic_conn_impl_t *conn,
       ai_quic_read_u32(buffer + 1u, buffer_len - 1u, &chunk, &version) == AI_QUIC_OK &&
       version == 0u) {
     return ai_quic_packet_decode(buffer, buffer_len, consumed, packet);
+  }
+  if (buffer_len >= 5u &&
+      ai_quic_read_u32(buffer + 1u, buffer_len - 1u, &chunk, &version) == AI_QUIC_OK &&
+      ai_quic_version_decode_long_header_type(version, buffer[0]) ==
+          AI_QUIC_PACKET_TYPE_RETRY) {
+    if (ai_quic_packet_decode(buffer, buffer_len, consumed, packet) != AI_QUIC_OK) {
+      return AI_QUIC_ERROR;
+    }
+    if (conn->retry_accepted ||
+        ai_quic_packet_verify_retry_integrity_tag(packet->header.version,
+                                                  &conn->current_initial_dcid,
+                                                  buffer,
+                                                  *consumed) != AI_QUIC_OK) {
+      ai_quic_packet_decode_set_error("%s", "retry integrity verification failed");
+      return AI_QUIC_ERROR;
+    }
+    return AI_QUIC_OK;
   }
   return ai_quic_packet_decode_long_protected(conn, buffer, buffer_len, consumed, packet);
 }

@@ -135,6 +135,9 @@ ai_quic_packet_type_t ai_quic_version_decode_long_header_type(
   if (bits == ops->handshake_type_bits) {
     return AI_QUIC_PACKET_TYPE_HANDSHAKE;
   }
+  if (bits == ops->retry_type_bits) {
+    return AI_QUIC_PACKET_TYPE_RETRY;
+  }
   return AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION;
 }
 
@@ -159,6 +162,10 @@ ai_quic_result_t ai_quic_version_encode_long_header_first_byte(
     type_bits = ops->initial_type_bits;
   } else if (type == AI_QUIC_PACKET_TYPE_HANDSHAKE) {
     type_bits = ops->handshake_type_bits;
+  } else if (type == AI_QUIC_PACKET_TYPE_RETRY) {
+    type_bits = ops->retry_type_bits;
+    *first_byte = (uint8_t)(0xc0u | (uint8_t)(type_bits << 4u));
+    return AI_QUIC_OK;
   } else {
     return AI_QUIC_ERROR;
   }

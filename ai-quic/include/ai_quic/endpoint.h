@@ -46,6 +46,12 @@ ai_quic_result_t ai_quic_endpoint_start_client(ai_quic_endpoint_t *endpoint,
                                                const char *request_path);
 ai_quic_result_t ai_quic_endpoint_queue_request(ai_quic_endpoint_t *endpoint,
                                                 const char *request_path);
+ai_quic_result_t ai_quic_endpoint_receive_datagram_from(ai_quic_endpoint_t *endpoint,
+                                                        const uint8_t *datagram,
+                                                        size_t datagram_len,
+                                                        const uint8_t *peer_addr,
+                                                        size_t peer_addr_len,
+                                                        uint64_t now_ms);
 ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
                                                    const uint8_t *datagram,
                                                    size_t datagram_len,
