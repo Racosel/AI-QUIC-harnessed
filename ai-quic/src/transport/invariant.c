@@ -2,20 +2,6 @@
 
 #include <string.h>
 
-static ai_quic_packet_type_t ai_quic_invariant_long_header_packet_type(
-    uint8_t first_byte) {
-  uint8_t bits;
-
-  bits = (uint8_t)((first_byte >> 4u) & 0x03u);
-  if (bits == 0u) {
-    return AI_QUIC_PACKET_TYPE_INITIAL;
-  }
-  if (bits == 2u) {
-    return AI_QUIC_PACKET_TYPE_HANDSHAKE;
-  }
-  return AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION;
-}
-
 ai_quic_result_t ai_quic_parse_invariant_header(const uint8_t *datagram,
                                                 size_t datagram_len,
                                                 ai_quic_packet_header_t *header) {
@@ -36,13 +22,17 @@ ai_quic_result_t ai_quic_parse_invariant_header(const uint8_t *datagram,
     return AI_QUIC_OK;
   }
 
-  header->type = ai_quic_invariant_long_header_packet_type(datagram[0]);
   offset += 1u;
   if (ai_quic_read_u32(datagram + offset, datagram_len - offset, &chunk, &version) !=
       AI_QUIC_OK) {
     return AI_QUIC_ERROR;
   }
   header->version = version;
+  if (version == 0u) {
+    header->type = AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION;
+  } else {
+    header->type = ai_quic_version_decode_long_header_type(version, datagram[0]);
+  }
   offset += chunk;
 
   if (datagram_len < offset + 1u) {
@@ -60,9 +50,6 @@ ai_quic_result_t ai_quic_parse_invariant_header(const uint8_t *datagram,
     return AI_QUIC_ERROR;
   }
 
-  if (header->version == 0u) {
-    header->type = AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION;
-  }
   header->packet_length = datagram_len;
   return AI_QUIC_OK;
 }

@@ -14,6 +14,41 @@
 
 static const SSL_QUIC_METHOD kAiQuicMethod;
 
+const char *ai_quic_tls_cipher_policy_name(
+    ai_quic_tls_cipher_policy_t cipher_policy) {
+  switch (cipher_policy) {
+    case AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY:
+      return "chacha20-only";
+    case AI_QUIC_TLS_CIPHER_POLICY_DEFAULT:
+    default:
+      return "default";
+  }
+}
+
+ai_quic_tls_cipher_policy_t ai_quic_tls_cipher_policy_from_name(
+    const char *name) {
+  if (name == NULL || name[0] == '\0' || strcmp(name, "default") == 0) {
+    return AI_QUIC_TLS_CIPHER_POLICY_DEFAULT;
+  }
+  if (strcmp(name, "chacha20-only") == 0 || strcmp(name, "chacha20") == 0) {
+    return AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY;
+  }
+  return AI_QUIC_TLS_CIPHER_POLICY_DEFAULT;
+}
+
+const char *ai_quic_tls_cipher_suite_name(uint32_t cipher_suite) {
+  switch (cipher_suite & 0xffffu) {
+    case 0x1301u:
+      return "TLS_AES_128_GCM_SHA256";
+    case 0x1302u:
+      return "TLS_AES_256_GCM_SHA384";
+    case 0x1303u:
+      return "TLS_CHACHA20_POLY1305_SHA256";
+    default:
+      return "unknown";
+  }
+}
+
 static const char *ai_quic_tls_event_type_name(ai_quic_tls_event_type_t type) {
   switch (type) {
     case AI_QUIC_TLS_EVENT_WRITE_CRYPTO:
@@ -276,6 +311,14 @@ static int ai_quic_tls_store_secret(ai_quic_tls_session_t *session,
       cipher != NULL ? SSL_CIPHER_get_protocol_id(cipher) : 0u;
   slot->secret_len = secret_len;
   memcpy(slot->secret, secret, secret_len);
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "tls",
+                    "store_secret level=%d direction=%s cipher=0x%04x cipher_name=%s policy=%s",
+                    (int)level,
+                    is_write ? "write" : "read",
+                    (unsigned)(slot->cipher_suite & 0xffffu),
+                    ai_quic_tls_cipher_suite_name(slot->cipher_suite),
+                    ai_quic_tls_cipher_policy_name(session->cipher_policy));
 
   if (is_write && level == ssl_encryption_handshake &&
       ai_quic_tls_emit_install_event(session,
@@ -452,6 +495,15 @@ static ai_quic_result_t ai_quic_tls_boringssl_setup(
     return AI_QUIC_ERROR;
   }
 
+  if (session->cipher_policy == AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY) {
+    /*
+     * QUIC Initial protection remains version-salt based AES-128-GCM. This
+     * policy only restricts TLS 1.3 Handshake/1-RTT cipher negotiation.
+     */
+    ai_quic_boringssl_set_aes_hw_override(ssl_ctx, 0);
+    ai_quic_boringssl_set_tls13_chacha20_only(ssl_ctx, 1);
+  }
+
   SSL_CTX_set_keylog_callback(ssl_ctx, ai_quic_tls_keylog_callback);
   SSL_CTX_set_custom_verify(ssl_ctx, SSL_VERIFY_NONE, ai_quic_tls_verify_ok);
 
@@ -563,7 +615,8 @@ const char *ai_quic_tls_backend_name(void) {
 ai_quic_tls_session_t *ai_quic_tls_session_create(ai_quic_tls_ctx_t *tls_ctx,
                                                   int is_server,
                                                   const char *alpn,
-                                                  const char *keylog_path) {
+                                                  const char *keylog_path,
+                                                  ai_quic_tls_cipher_policy_t cipher_policy) {
   ai_quic_tls_session_t *session;
 
   if (tls_ctx == NULL) {
@@ -577,6 +630,7 @@ ai_quic_tls_session_t *ai_quic_tls_session_create(ai_quic_tls_ctx_t *tls_ctx,
 
   session->ctx = tls_ctx;
   session->is_server = is_server;
+  session->cipher_policy = cipher_policy;
   session->mode = ai_quic_tls_should_use_boringssl(tls_ctx, is_server)
                       ? AI_QUIC_TLS_MODE_BORINGSSL_QUIC
                       : AI_QUIC_TLS_MODE_FAKE;
@@ -589,6 +643,13 @@ ai_quic_tls_session_t *ai_quic_tls_session_create(ai_quic_tls_ctx_t *tls_ctx,
   if (keylog_path != NULL && keylog_path[0] != '\0') {
     session->keylog_file = fopen(keylog_path, "a");
   }
+
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "tls",
+                    "create_session is_server=%d mode=%s cipher_policy=%s",
+                    is_server,
+                    session->mode == AI_QUIC_TLS_MODE_BORINGSSL_QUIC ? "boringssl" : "fake",
+                    ai_quic_tls_cipher_policy_name(session->cipher_policy));
 
   if (session->mode == AI_QUIC_TLS_MODE_BORINGSSL_QUIC &&
       ai_quic_tls_boringssl_setup(session) != AI_QUIC_OK) {
@@ -872,7 +933,17 @@ ai_quic_result_t ai_quic_tls_session_get_packet_secret(
                                           derived_len) != AI_QUIC_OK) {
     return AI_QUIC_ERROR;
   }
-  *cipher_suite = TLS1_CK_AES_128_GCM_SHA256;
+  *cipher_suite = session->cipher_policy == AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY
+                      ? TLS1_3_CK_CHACHA20_POLY1305_SHA256
+                      : TLS1_CK_AES_128_GCM_SHA256;
   *secret_len = derived_len;
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "tls",
+                    "fake_secret level=%d direction=%s cipher=0x%04x cipher_name=%s policy=%s",
+                    (int)level,
+                    is_write ? "write" : "read",
+                    (unsigned)(*cipher_suite & 0xffffu),
+                    ai_quic_tls_cipher_suite_name(*cipher_suite),
+                    ai_quic_tls_cipher_policy_name(session->cipher_policy));
   return AI_QUIC_OK;
 }

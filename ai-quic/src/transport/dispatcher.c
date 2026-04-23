@@ -6,8 +6,12 @@
 #include "transport_internal.h"
 
 struct ai_quic_dispatcher {
-  ai_quic_version_t supported_versions[1];
-  size_t supported_versions_len;
+  ai_quic_version_t acceptable_versions[AI_QUIC_MAX_SUPPORTED_VERSIONS];
+  size_t acceptable_versions_len;
+  ai_quic_version_t offered_versions[AI_QUIC_MAX_SUPPORTED_VERSIONS];
+  size_t offered_versions_len;
+  ai_quic_version_t fully_deployed_versions[AI_QUIC_MAX_SUPPORTED_VERSIONS];
+  size_t fully_deployed_versions_len;
 };
 
 ai_quic_dispatcher_t *ai_quic_dispatcher_create(void) {
@@ -18,8 +22,15 @@ ai_quic_dispatcher_t *ai_quic_dispatcher_create(void) {
     return NULL;
   }
 
-  dispatcher->supported_versions[0] = AI_QUIC_VERSION_V1;
-  dispatcher->supported_versions_len = 1u;
+  dispatcher->acceptable_versions_len = ai_quic_version_supported_list(
+      dispatcher->acceptable_versions,
+      AI_QUIC_ARRAY_LEN(dispatcher->acceptable_versions));
+  dispatcher->offered_versions_len = ai_quic_version_offered_list(
+      dispatcher->offered_versions,
+      AI_QUIC_ARRAY_LEN(dispatcher->offered_versions));
+  dispatcher->fully_deployed_versions_len = ai_quic_version_fully_deployed_list(
+      dispatcher->fully_deployed_versions,
+      AI_QUIC_ARRAY_LEN(dispatcher->fully_deployed_versions));
   return dispatcher;
 }
 
@@ -37,15 +48,36 @@ size_t ai_quic_dispatcher_supported_versions(
     return 0u;
   }
   if (versions == NULL || capacity == 0u) {
-    return dispatcher->supported_versions_len;
+    return dispatcher->acceptable_versions_len;
   }
 
-  copy_len = dispatcher->supported_versions_len;
+  copy_len = dispatcher->acceptable_versions_len;
   if (copy_len > capacity) {
     copy_len = capacity;
   }
-  memcpy(versions, dispatcher->supported_versions, copy_len * sizeof(*versions));
-  return dispatcher->supported_versions_len;
+  memcpy(versions, dispatcher->acceptable_versions, copy_len * sizeof(*versions));
+  return dispatcher->acceptable_versions_len;
+}
+
+size_t ai_quic_dispatcher_offered_versions(
+    const ai_quic_dispatcher_t *dispatcher,
+    ai_quic_version_t *versions,
+    size_t capacity) {
+  size_t copy_len;
+
+  if (dispatcher == NULL) {
+    return 0u;
+  }
+  if (versions == NULL || capacity == 0u) {
+    return dispatcher->offered_versions_len;
+  }
+
+  copy_len = dispatcher->offered_versions_len;
+  if (copy_len > capacity) {
+    copy_len = capacity;
+  }
+  memcpy(versions, dispatcher->offered_versions, copy_len * sizeof(*versions));
+  return dispatcher->offered_versions_len;
 }
 
 int ai_quic_dispatcher_is_supported_version(const ai_quic_dispatcher_t *dispatcher,
@@ -55,8 +87,11 @@ int ai_quic_dispatcher_is_supported_version(const ai_quic_dispatcher_t *dispatch
   if (dispatcher == NULL) {
     return 0;
   }
-  for (i = 0; i < dispatcher->supported_versions_len; ++i) {
-    if (dispatcher->supported_versions[i] == version) {
+  if (ai_quic_version_reserved(version)) {
+    return 0;
+  }
+  for (i = 0; i < dispatcher->acceptable_versions_len; ++i) {
+    if (dispatcher->acceptable_versions[i] == version) {
       return 1;
     }
   }

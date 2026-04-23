@@ -55,28 +55,6 @@ const char *ai_quic_packet_encode_last_error(void) {
   return g_ai_quic_packet_encode_error;
 }
 
-static uint8_t ai_quic_long_header_first_byte(ai_quic_packet_type_t type) {
-  switch (type) {
-    case AI_QUIC_PACKET_TYPE_INITIAL:
-      return 0xc3u;
-    case AI_QUIC_PACKET_TYPE_HANDSHAKE:
-      return 0xe3u;
-    default:
-      return 0x80u;
-  }
-}
-
-static ai_quic_packet_type_t ai_quic_long_header_packet_type(uint8_t first_byte) {
-  uint8_t bits = (uint8_t)((first_byte >> 4u) & 0x03u);
-  if (bits == 0u) {
-    return AI_QUIC_PACKET_TYPE_INITIAL;
-  }
-  if (bits == 2u) {
-    return AI_QUIC_PACKET_TYPE_HANDSHAKE;
-  }
-  return AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION;
-}
-
 static ai_quic_result_t ai_quic_encode_frames(const ai_quic_packet_t *packet,
                                               uint8_t *payload,
                                               size_t capacity,
@@ -171,7 +149,13 @@ ai_quic_result_t ai_quic_packet_encode(const ai_quic_packet_t *packet,
     return AI_QUIC_OK;
   }
 
-  buffer[offset++] = ai_quic_long_header_first_byte(packet->header.type);
+  if (ai_quic_version_encode_long_header_first_byte(packet->header.version,
+                                                    packet->header.type,
+                                                    4u,
+                                                    &buffer[offset]) != AI_QUIC_OK) {
+    return AI_QUIC_ERROR;
+  }
+  offset += 1u;
   if (ai_quic_write_u32(buffer + offset,
                         capacity - offset,
                         &chunk,
@@ -312,7 +296,6 @@ ai_quic_result_t ai_quic_packet_decode(const uint8_t *buffer,
     return AI_QUIC_OK;
   }
 
-  packet->header.type = ai_quic_long_header_packet_type(buffer[0]);
   offset += 1u;
   if (ai_quic_read_u32(buffer + offset, buffer_len - offset, &chunk, &version) !=
       AI_QUIC_OK) {
@@ -322,6 +305,9 @@ ai_quic_result_t ai_quic_packet_decode(const uint8_t *buffer,
     return AI_QUIC_ERROR;
   }
   packet->header.version = version;
+  packet->header.type =
+      version == 0u ? AI_QUIC_PACKET_TYPE_VERSION_NEGOTIATION
+                    : ai_quic_version_decode_long_header_type(version, buffer[0]);
   offset += chunk;
 
   if (buffer_len < offset + 1u) {
@@ -524,18 +510,20 @@ static ai_quic_result_t ai_quic_quic_expand_label(const EVP_MD *md,
 }
 
 static ai_quic_result_t ai_quic_derive_initial_traffic_secret(
+    ai_quic_version_t version,
     const ai_quic_cid_t *original_dcid,
     int is_server_secret,
     uint8_t *secret,
     size_t secret_len) {
-  static const uint8_t kInitialSalt[] = {0x38, 0x76, 0x2c, 0xf7, 0xf5,
-                                         0x59, 0x34, 0xb3, 0x4d, 0x17,
-                                         0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
-                                         0xad, 0xcc, 0xbb, 0x7f, 0x0a};
+  const ai_quic_version_ops_t *ops;
   uint8_t initial_secret[EVP_MAX_MD_SIZE];
   size_t initial_secret_len;
 
   if (original_dcid == NULL || secret == NULL || secret_len == 0u) {
+    return AI_QUIC_ERROR;
+  }
+  ops = ai_quic_version_ops_find(version);
+  if (ops == NULL) {
     return AI_QUIC_ERROR;
   }
 
@@ -544,8 +532,8 @@ static ai_quic_result_t ai_quic_derive_initial_traffic_secret(
                     EVP_sha256(),
                     original_dcid->bytes,
                     original_dcid->len,
-                    kInitialSalt,
-                    sizeof(kInitialSalt))) {
+                    ops->initial_salt,
+                    sizeof(ops->initial_salt))) {
     return AI_QUIC_ERROR;
   }
 
@@ -602,10 +590,12 @@ static ai_quic_result_t ai_quic_select_cipher(uint32_t cipher_suite,
 
 static ai_quic_result_t ai_quic_build_packet_protection(
     ai_quic_conn_impl_t *conn,
+    ai_quic_version_t version,
     ai_quic_packet_type_t type,
     int is_write,
     const ai_quic_cid_t *initial_dcid,
     ai_quic_packet_protection_t *protection) {
+  const ai_quic_version_ops_t *ops;
   uint8_t secret[64];
   size_t secret_len;
   uint32_t cipher_suite;
@@ -616,6 +606,11 @@ static ai_quic_result_t ai_quic_build_packet_protection(
   }
 
   memset(protection, 0, sizeof(*protection));
+  ops = ai_quic_version_ops_find(version);
+  if (ops == NULL) {
+    ai_quic_packet_encode_set_error("unsupported version=0x%08x", (unsigned)version);
+    return AI_QUIC_ERROR;
+  }
   if (type == AI_QUIC_PACKET_TYPE_INITIAL) {
     ai_quic_cid_t secret_dcid;
     int want_server_secret;
@@ -643,7 +638,8 @@ static ai_quic_result_t ai_quic_build_packet_protection(
 
     secret_len = (size_t)EVP_MD_size(protection->md);
     want_server_secret = conn->is_server == is_write;
-    if (ai_quic_derive_initial_traffic_secret(&secret_dcid,
+    if (ai_quic_derive_initial_traffic_secret(version,
+                                              &secret_dcid,
                                               want_server_secret,
                                               secret,
                                               secret_len) != AI_QUIC_OK) {
@@ -678,19 +674,19 @@ static ai_quic_result_t ai_quic_build_packet_protection(
       ai_quic_quic_expand_label(protection->md,
                                 secret,
                                 secret_len,
-                                "quic key",
+                                ops->key_label,
                                 protection->key,
                                 protection->key_len) != AI_QUIC_OK ||
       ai_quic_quic_expand_label(protection->md,
                                 secret,
                                 secret_len,
-                                "quic iv",
+                                ops->iv_label,
                                 protection->iv,
                                 protection->iv_len) != AI_QUIC_OK ||
       ai_quic_quic_expand_label(protection->md,
                                 secret,
                                 secret_len,
-                                "quic hp",
+                                ops->hp_label,
                                 protection->hp,
                                 protection->hp_key_len) != AI_QUIC_OK) {
     ai_quic_packet_encode_set_error("quic key derivation failed type=%d cipher=0x%08x",
@@ -779,14 +775,6 @@ static uint64_t ai_quic_decode_packet_number_value(uint64_t largest_pn,
   return candidate_pn;
 }
 
-static uint8_t ai_quic_long_header_standard_first_byte(ai_quic_packet_type_t type,
-                                                       uint8_t pn_len) {
-  uint8_t type_bits;
-
-  type_bits = type == AI_QUIC_PACKET_TYPE_HANDSHAKE ? 0x20u : 0x00u;
-  return (uint8_t)(0xc0u | type_bits | ((pn_len - 1u) & 0x03u));
-}
-
 static ai_quic_result_t ai_quic_packet_encode_long_protected(
     ai_quic_conn_impl_t *conn,
     const ai_quic_packet_t *packet,
@@ -811,6 +799,7 @@ static ai_quic_result_t ai_quic_packet_encode_long_protected(
   if (ai_quic_encode_frames(packet, plaintext, sizeof(plaintext), &plaintext_len) !=
       AI_QUIC_OK ||
       ai_quic_build_packet_protection(conn,
+                                      packet->header.version,
                                       packet->header.type,
                                       1,
                                       &conn->original_destination_cid,
@@ -830,8 +819,16 @@ static ai_quic_result_t ai_quic_packet_encode_long_protected(
     return AI_QUIC_ERROR;
   }
 
-  buffer[header_offset++] = ai_quic_long_header_standard_first_byte(packet->header.type,
-                                                                    (uint8_t)pn_len);
+  if (ai_quic_version_encode_long_header_first_byte(packet->header.version,
+                                                    packet->header.type,
+                                                    (uint8_t)pn_len,
+                                                    &buffer[header_offset]) != AI_QUIC_OK) {
+    ai_quic_packet_encode_set_error("unsupported long header type=%d version=0x%08x",
+                                    (int)packet->header.type,
+                                    (unsigned)packet->header.version);
+    return AI_QUIC_ERROR;
+  }
+  header_offset += 1u;
   if (ai_quic_write_u32(buffer + header_offset,
                         capacity - header_offset,
                         &chunk,
@@ -939,6 +936,7 @@ static ai_quic_result_t ai_quic_packet_encode_short_protected(
       ai_quic_encode_frames(packet, plaintext, sizeof(plaintext), &plaintext_len) !=
           AI_QUIC_OK ||
       ai_quic_build_packet_protection(conn,
+                                      packet->header.version,
                                       AI_QUIC_PACKET_TYPE_ONE_RTT,
                                       1,
                                       NULL,
@@ -1077,7 +1075,7 @@ static ai_quic_result_t ai_quic_packet_decode_long_protected(
   }
   offset += 1u + buffer[offset];
 
-  packet->header.type = ai_quic_long_header_packet_type(buffer[0]);
+  packet->header.type = ai_quic_version_decode_long_header_type(version, buffer[0]);
   if (packet->header.type == AI_QUIC_PACKET_TYPE_INITIAL) {
     if (ai_quic_varint_read(buffer + offset,
                             buffer_len - offset,
@@ -1111,6 +1109,7 @@ static ai_quic_result_t ai_quic_packet_decode_long_protected(
   }
 
   if (ai_quic_build_packet_protection(conn,
+                                      packet->header.version,
                                       packet->header.type,
                                       0,
                                       &packet->header.dcid,
@@ -1217,9 +1216,11 @@ static ai_quic_result_t ai_quic_packet_decode_short_protected(
   }
 
   packet->header.type = AI_QUIC_PACKET_TYPE_ONE_RTT;
+  packet->header.version = conn->version;
   packet->header.dcid = conn->local_cid;
   pn_offset = 1u + conn->local_cid.len;
   if (ai_quic_build_packet_protection(conn,
+                                      conn->version,
                                       AI_QUIC_PACKET_TYPE_ONE_RTT,
                                       0,
                                       NULL,
@@ -1307,9 +1308,6 @@ ai_quic_result_t ai_quic_packet_decode_conn(ai_quic_conn_impl_t *conn,
 
   if ((buffer[0] & 0x80u) == 0u) {
     return ai_quic_packet_decode_short_protected(conn, buffer, buffer_len, consumed, packet);
-  }
-  if (((buffer[0] >> 4u) & 0x03u) == 0x03u) {
-    return ai_quic_packet_decode(buffer, buffer_len, consumed, packet);
   }
   if (buffer_len >= 5u &&
       ai_quic_read_u32(buffer + 1u, buffer_len - 1u, &chunk, &version) == AI_QUIC_OK &&

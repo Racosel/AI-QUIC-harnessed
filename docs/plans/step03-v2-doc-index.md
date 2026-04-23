@@ -128,7 +128,7 @@
   - `negotiated_version`
   - 当前 long header 使用版本
   - 本端/对端 `version_information`
-- 客户端能以 v1 发起，并在 `version_information` 中携带 `[v1, v2]` 风格的可用版本列表。
+- 客户端能以 v1 发起，并在 `version_information` 中携带按偏好降序排列的可用版本列表；若希望优先协商到 v2，首版更合理的声明是 `[v2, v1]`。
 - 服务端能在解析客户端首飞后：
   - 选择 v2 作为 Negotiated Version
   - 在同一连接内切换到 v2 路径

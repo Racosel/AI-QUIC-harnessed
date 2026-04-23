@@ -14,6 +14,7 @@ AI_QUIC_DOWNLOADS_DIR="${AI_QUIC_DOWNLOADS_DIR:-/downloads}"
 AI_QUIC_PORT="${AI_QUIC_PORT:-443}"
 AI_QUIC_BIND_HOST="${AI_QUIC_BIND_HOST:-::}"
 AI_QUIC_CLIENT_START_DELAY="${AI_QUIC_CLIENT_START_DELAY:-1}"
+AI_QUIC_CIPHER_POLICY="${AI_QUIC_CIPHER_POLICY:-default}"
 
 ai_quic_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${ai_quic_self_dir}/lib/common.sh"
@@ -45,6 +46,10 @@ ai_quic_log "www_dir=${AI_QUIC_WWW_DIR}"
 ai_quic_log "downloads_dir=${AI_QUIC_DOWNLOADS_DIR}"
 ai_quic_log "bind_host=${AI_QUIC_BIND_HOST}"
 ai_quic_log "port=${AI_QUIC_PORT}"
+if [ "${ai_quic_testcase}" = "chacha20" ] && [ "${AI_QUIC_CIPHER_POLICY}" = "default" ]; then
+  AI_QUIC_CIPHER_POLICY="chacha20-only"
+fi
+ai_quic_log "cipher_policy=${AI_QUIC_CIPHER_POLICY}"
 if command -v ip >/dev/null 2>&1; then
   {
     printf 'route_ipv4_begin\n'
@@ -100,6 +105,7 @@ stdbuf -oL -eL "${ai_quic_binary_path}" \
   --downloads "${AI_QUIC_DOWNLOADS_DIR}" \
   --requests "${ai_quic_requests}" \
   --testcase "${ai_quic_testcase}" \
+  --cipher-policy "${AI_QUIC_CIPHER_POLICY}" \
   --bind-host "${AI_QUIC_BIND_HOST}" \
   --port "${AI_QUIC_PORT}" >> "${AI_QUIC_LOG_FILE}" 2>&1 || rc=$?
 ai_quic_log "exit_code=${rc}"

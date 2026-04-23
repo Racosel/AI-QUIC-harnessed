@@ -11,6 +11,11 @@
 typedef struct ai_quic_tls_ctx ai_quic_tls_ctx_t;
 typedef struct ai_quic_tls_session ai_quic_tls_session_t;
 
+typedef enum ai_quic_tls_cipher_policy {
+  AI_QUIC_TLS_CIPHER_POLICY_DEFAULT = 0,
+  AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY = 1
+} ai_quic_tls_cipher_policy_t;
+
 typedef enum ai_quic_tls_event_type {
   AI_QUIC_TLS_EVENT_NONE = 0,
   AI_QUIC_TLS_EVENT_WRITE_CRYPTO = 1,
@@ -30,11 +35,17 @@ ai_quic_tls_ctx_t *ai_quic_tls_ctx_create(const char *cert_root);
 void ai_quic_tls_ctx_destroy(ai_quic_tls_ctx_t *tls_ctx);
 ai_quic_result_t ai_quic_tls_self_check(void);
 const char *ai_quic_tls_backend_name(void);
+const char *ai_quic_tls_cipher_policy_name(
+    ai_quic_tls_cipher_policy_t cipher_policy);
+ai_quic_tls_cipher_policy_t ai_quic_tls_cipher_policy_from_name(
+    const char *name);
+const char *ai_quic_tls_cipher_suite_name(uint32_t cipher_suite);
 
 ai_quic_tls_session_t *ai_quic_tls_session_create(ai_quic_tls_ctx_t *tls_ctx,
                                                   int is_server,
                                                   const char *alpn,
-                                                  const char *keylog_path);
+                                                  const char *keylog_path,
+                                                  ai_quic_tls_cipher_policy_t cipher_policy);
 void ai_quic_tls_session_destroy(ai_quic_tls_session_t *session);
 ai_quic_result_t ai_quic_tls_session_start(ai_quic_tls_session_t *session,
                                            const ai_quic_transport_params_t *local_params,

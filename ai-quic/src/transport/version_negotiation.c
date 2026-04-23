@@ -17,7 +17,7 @@ ai_quic_result_t ai_quic_build_version_negotiation(
       !ai_quic_cid_copy(&packet->header.scid, &incoming->dcid)) {
     return AI_QUIC_ERROR;
   }
-  packet->supported_versions_len = ai_quic_dispatcher_supported_versions(
+  packet->supported_versions_len = ai_quic_dispatcher_offered_versions(
       dispatcher,
       packet->supported_versions,
       AI_QUIC_ARRAY_LEN(packet->supported_versions));

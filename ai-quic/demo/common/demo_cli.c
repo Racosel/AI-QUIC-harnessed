@@ -22,6 +22,7 @@ void ai_quic_demo_print_help(const char *program_name, const char *role) {
   printf("  --downloads PATH\n");
   printf("  --requests STRING\n");
   printf("  --testcase NAME\n");
+  printf("  --cipher-policy default|chacha20-only\n");
   printf("  --bind-host HOST\n");
   printf("  --port N\n");
 }
@@ -44,6 +45,7 @@ int ai_quic_demo_parse_options(int argc,
       {"downloads", required_argument, NULL, 'd'},
       {"requests", required_argument, NULL, 'R'},
       {"testcase", required_argument, NULL, 't'},
+      {"cipher-policy", required_argument, NULL, 'P'},
       {"bind-host", required_argument, NULL, 'b'},
       {"port", required_argument, NULL, 'p'},
       {NULL, 0, NULL, 0}};
@@ -56,7 +58,7 @@ int ai_quic_demo_parse_options(int argc,
   optind = 1;
   while ((opt = getopt_long(argc,
                             argv,
-                            "hsrl:q:k:c:w:d:R:t:b:p:",
+                            "hsrl:q:k:c:w:d:R:t:P:b:p:",
                             long_options,
                             &option_index)) != -1) {
     (void)option_index;
@@ -94,6 +96,9 @@ int ai_quic_demo_parse_options(int argc,
       case 't':
         options->testcase = optarg;
         break;
+      case 'P':
+        options->cipher_policy = optarg;
+        break;
       case 'b':
         options->bind_host = optarg;
         break;
@@ -123,6 +128,14 @@ ai_quic_result_t ai_quic_demo_build_endpoint_config(
   config->cert_root = options->cert_dir;
   config->www_root = options->www_dir;
   config->downloads_root = options->downloads_dir;
+  config->testcase = options->testcase;
+  if (options->cipher_policy != NULL) {
+    config->cipher_policy =
+        ai_quic_tls_cipher_policy_from_name(options->cipher_policy);
+  } else if (options->testcase != NULL &&
+             strcmp(options->testcase, "chacha20") == 0) {
+    config->cipher_policy = AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY;
+  }
   return AI_QUIC_OK;
 }
 

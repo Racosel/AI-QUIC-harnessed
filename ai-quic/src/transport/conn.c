@@ -15,6 +15,8 @@ ai_quic_conn_t *ai_quic_conn_create(ai_quic_version_t version, int is_server) {
   }
 
   conn->version = version;
+  conn->original_version = version;
+  conn->negotiated_version = version;
   conn->is_server = is_server;
   conn->state = AI_QUIC_CONN_STATE_PRE_VALIDATION;
   ai_quic_transport_params_init(&conn->local_transport_params);
@@ -113,6 +115,8 @@ ai_quic_result_t ai_quic_conn_get_info(const ai_quic_conn_t *conn,
   impl = (const ai_quic_conn_impl_t *)conn;
   memset(info, 0, sizeof(*info));
   info->version = impl->version;
+  info->original_version = impl->original_version;
+  info->negotiated_version = impl->negotiated_version;
   info->state = impl->state;
   info->local_cid = impl->local_cid;
   info->peer_cid = impl->peer_cid;
@@ -123,6 +127,8 @@ ai_quic_result_t ai_quic_conn_get_info(const ai_quic_conn_t *conn,
   info->can_send_1rtt = impl->can_send_1rtt;
   info->handshake_confirmed = impl->handshake_confirmed;
   info->address_validated = impl->address_validated;
+  info->close_error_code_set = impl->close_error_code_set;
+  info->close_error_code = impl->close_error_code;
   info->bytes_received = impl->bytes_received;
   info->bytes_sent = impl->bytes_sent;
   info->total_request_streams = impl->total_request_streams;

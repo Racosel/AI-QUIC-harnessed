@@ -341,7 +341,7 @@ Initial protection 的输入必须明确带版本：
 
 - `Chosen Version` 必须包含在 `Available Versions` 中
 - `Available Versions` 按偏好降序排列
-- 首版推荐 `[v1, v2]`
+- 若客户端希望优先协商到 v2，首版推荐 `[v2, v1]`
 
 对 server 侧：
 
@@ -366,7 +366,9 @@ Initial protection 的输入必须明确带版本：
 校验失败时：
 
 - 关闭连接
-- 对 v1/v2 路径统一映射到版本协商错误
+- 解析失败与协商语义失败分开处理：
+- 若是 `version_information` 自身格式错误（例如长度非法、含 `0`、client 的 `Chosen Version` 未包含在其 `Available Versions` 中），至少在 v1 路径上必须按 RFC 9368 使用 `TRANSPORT_PARAMETER_ERROR`
+- 若是已通过认证后的协商语义不一致（例如 `Chosen Version` 与当前连接版本不一致、server 选择了 client 未声明支持的版本、compatible negotiation 学到的版本与 server `Chosen Version` 不一致），应映射到 `VERSION_NEGOTIATION_ERROR`
 
 ### 8.3 TLS 适配层边界
 

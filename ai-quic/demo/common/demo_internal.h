@@ -15,6 +15,7 @@ typedef struct ai_quic_demo_options {
   const char *downloads_dir;
   const char *requests;
   const char *testcase;
+  const char *cipher_policy;
   const char *bind_host;
   uint16_t port;
   int run_mode;

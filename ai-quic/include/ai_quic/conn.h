@@ -22,6 +22,8 @@ typedef struct ai_quic_conn ai_quic_conn_t;
 
 typedef struct ai_quic_conn_info {
   ai_quic_version_t version;
+  ai_quic_version_t original_version;
+  ai_quic_version_t negotiated_version;
   ai_quic_conn_state_t state;
   ai_quic_cid_t local_cid;
   ai_quic_cid_t peer_cid;
@@ -32,6 +34,8 @@ typedef struct ai_quic_conn_info {
   int can_send_1rtt;
   int handshake_confirmed;
   int address_validated;
+  int close_error_code_set;
+  uint64_t close_error_code;
   uint64_t bytes_received;
   uint64_t bytes_sent;
   size_t total_request_streams;

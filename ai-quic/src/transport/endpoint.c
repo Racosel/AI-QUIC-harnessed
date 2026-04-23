@@ -164,6 +164,8 @@ void ai_quic_endpoint_config_init(ai_quic_endpoint_config_t *config,
   config->idle_timeout_ms = 30000u;
   config->local_cid_len = 8u;
   config->alpn = "hq-interop";
+  config->testcase = NULL;
+  config->cipher_policy = AI_QUIC_TLS_CIPHER_POLICY_DEFAULT;
 }
 
 static ai_quic_result_t ai_quic_endpoint_push(ai_quic_endpoint_impl_t *endpoint,
@@ -301,12 +303,15 @@ ai_quic_result_t ai_quic_endpoint_start_client(ai_quic_endpoint_t *endpoint,
   if (impl->conn == NULL) {
     return AI_QUIC_ERROR;
   }
+  impl->conn->compatible_v2_enabled =
+      impl->config.testcase != NULL && strcmp(impl->config.testcase, "v2") == 0;
 
   if (ai_quic_conn_init_transport(impl->conn,
                                   impl->tls_ctx,
                                   impl->qlog,
                                   impl->config.alpn,
-                                  impl->config.keylog_path) != AI_QUIC_OK ||
+                                  impl->config.keylog_path,
+                                  impl->config.cipher_policy) != AI_QUIC_OK ||
       ai_quic_conn_start_client(impl->conn, authority, NULL) !=
           AI_QUIC_OK) {
     impl->status = AI_QUIC_ERROR;
@@ -443,17 +448,20 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
   }
 
   if (impl->conn == NULL && decision.action == AI_QUIC_DISPATCH_CREATE_CONN) {
-    impl->conn = (ai_quic_conn_impl_t *)ai_quic_conn_create(AI_QUIC_VERSION_V1, 1);
+    impl->conn = (ai_quic_conn_impl_t *)ai_quic_conn_create(decision.header.version, 1);
     if (impl->conn == NULL ||
         ai_quic_conn_init_transport(impl->conn,
                                     impl->tls_ctx,
                                     impl->qlog,
                                     impl->config.alpn,
-                                    impl->config.keylog_path) != AI_QUIC_OK) {
+                                    impl->config.keylog_path,
+                                    impl->config.cipher_policy) != AI_QUIC_OK) {
       impl->status = AI_QUIC_ERROR;
       free(staged);
       return AI_QUIC_ERROR;
     }
+    impl->conn->compatible_v2_enabled =
+        impl->config.testcase != NULL && strcmp(impl->config.testcase, "v2") == 0;
   }
 
   if (impl->conn == NULL) {
@@ -464,6 +472,8 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
   offset = 0u;
   staged_len = 0u;
   while (offset < datagram_len) {
+    size_t on_wire_packet_len;
+
     if (ai_quic_is_all_zero(datagram + offset, datagram_len - offset)) {
       break;
     }
@@ -526,12 +536,19 @@ ai_quic_result_t ai_quic_endpoint_receive_datagram(ai_quic_endpoint_t *endpoint,
       free(staged);
       return AI_QUIC_ERROR;
     }
+    on_wire_packet_len = consumed;
+    if (offset + consumed < datagram_len &&
+        ai_quic_is_all_zero(datagram + offset + consumed,
+                            datagram_len - (offset + consumed))) {
+      on_wire_packet_len = datagram_len - offset;
+      packet.header.packet_length = on_wire_packet_len;
+    }
     ai_quic_qlog_packet(impl->qlog,
                         now_ms,
                         "packet_received",
                         &packet,
                         datagram + offset,
-                        consumed);
+                        on_wire_packet_len);
     if (ai_quic_conn_on_packet(impl->conn,
                                &packet,
                                now_ms,

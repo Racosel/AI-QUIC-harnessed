@@ -59,6 +59,7 @@ struct ai_quic_tls_session {
   ai_quic_tls_ctx_t *ctx;
   int is_server;
   ai_quic_tls_mode_t mode;
+  ai_quic_tls_cipher_policy_t cipher_policy;
   ai_quic_transport_params_t local_params;
   ai_quic_transport_params_t peer_params;
   uint8_t local_params_wire[512];
@@ -92,5 +93,7 @@ ai_quic_result_t ai_quic_tls_generate_initial_secret(const uint8_t *seed,
 ai_quic_result_t ai_quic_tls_session_maybe_log_keys(
     ai_quic_tls_session_t *session,
     ai_quic_tls_event_type_t type);
+void ai_quic_boringssl_set_aes_hw_override(SSL_CTX *ctx, int override_value);
+void ai_quic_boringssl_set_tls13_chacha20_only(SSL_CTX *ctx, int enabled);
 
 #endif

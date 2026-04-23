@@ -85,19 +85,24 @@ static int test_version_negotiation_packet(void) {
   ai_quic_dispatch_decision_t decision;
   uint8_t datagram[AI_QUIC_MAX_PACKET_SIZE];
   size_t written;
+  size_t chunk;
 
   dispatcher = ai_quic_dispatcher_create();
   AI_QUIC_ASSERT(dispatcher != NULL);
 
   memset(&initial, 0, sizeof(initial));
   initial.header.type = AI_QUIC_PACKET_TYPE_INITIAL;
-  initial.header.version = 0xaaaaaaaau;
+  initial.header.version = AI_QUIC_VERSION_V1;
   AI_QUIC_ASSERT(ai_quic_random_cid(&initial.header.dcid, 8u) == AI_QUIC_OK);
   AI_QUIC_ASSERT(ai_quic_random_cid(&initial.header.scid, 8u) == AI_QUIC_OK);
   initial.frames[0].type = AI_QUIC_FRAME_PADDING;
   initial.frame_count = 1u;
   AI_QUIC_ASSERT(ai_quic_packet_encode(&initial, datagram, sizeof(datagram), &written) ==
                  AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_write_u32(datagram + 1u,
+                                   sizeof(datagram) - 1u,
+                                   &chunk,
+                                   0xaaaaaaaau) == AI_QUIC_OK);
   while (written < AI_QUIC_MIN_INITIAL_DATAGRAM_SIZE) {
     datagram[written++] = 0u;
   }
@@ -112,8 +117,9 @@ static int test_version_negotiation_packet(void) {
   AI_QUIC_ASSERT(vn.header.version == 0u);
   AI_QUIC_ASSERT(ai_quic_cid_equal(&vn.header.dcid, &initial.header.scid));
   AI_QUIC_ASSERT(ai_quic_cid_equal(&vn.header.scid, &initial.header.dcid));
-  AI_QUIC_ASSERT(vn.supported_versions_len == 1u);
+  AI_QUIC_ASSERT(vn.supported_versions_len == 2u);
   AI_QUIC_ASSERT(vn.supported_versions[0] == AI_QUIC_VERSION_V1);
+  AI_QUIC_ASSERT(vn.supported_versions[1] == AI_QUIC_VERSION_V2);
 
   ai_quic_dispatcher_destroy(dispatcher);
   return 0;
@@ -251,7 +257,7 @@ static int test_transport_params_validation(void) {
   ai_quic_transport_params_t params;
   ai_quic_cid_t original;
   ai_quic_cid_t peer;
-  uint8_t encoded[128];
+  uint8_t encoded[256];
   size_t written;
   ai_quic_transport_params_t decoded;
 
@@ -261,6 +267,11 @@ static int test_transport_params_validation(void) {
   params.initial_source_connection_id = peer;
   params.original_destination_connection_id = original;
   params.has_original_destination_connection_id = 1;
+  params.version_information.present = 1;
+  params.version_information.chosen_version = AI_QUIC_VERSION_V1;
+  params.version_information.available_versions[0] = AI_QUIC_VERSION_V2;
+  params.version_information.available_versions[1] = AI_QUIC_VERSION_V1;
+  params.version_information.available_versions_len = 2u;
   AI_QUIC_ASSERT(ai_quic_transport_params_encode(&params,
                                                  encoded,
                                                  sizeof(encoded),
@@ -270,6 +281,237 @@ static int test_transport_params_validation(void) {
                  AI_QUIC_OK);
   AI_QUIC_ASSERT(ai_quic_transport_params_validate_server(&decoded, &peer) ==
                  AI_QUIC_OK);
+  AI_QUIC_ASSERT(decoded.version_information.present);
+  AI_QUIC_ASSERT_EQ(decoded.version_information.chosen_version, AI_QUIC_VERSION_V1);
+  AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions_len, 2u);
+  AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions[0], AI_QUIC_VERSION_V2);
+  AI_QUIC_ASSERT_EQ(decoded.version_information.available_versions[1], AI_QUIC_VERSION_V1);
+  return 0;
+}
+
+static int test_transport_params_reject_malformed_version_information(void) {
+  uint8_t encoded[64];
+  ai_quic_transport_params_t params;
+  size_t offset;
+  size_t chunk;
+
+  offset = 0u;
+  AI_QUIC_ASSERT(ai_quic_varint_write(encoded + offset,
+                                      sizeof(encoded) - offset,
+                                      &chunk,
+                                      0x11u) == AI_QUIC_OK);
+  offset += chunk;
+  AI_QUIC_ASSERT(ai_quic_varint_write(encoded + offset,
+                                      sizeof(encoded) - offset,
+                                      &chunk,
+                                      5u) == AI_QUIC_OK);
+  offset += chunk;
+  AI_QUIC_ASSERT(ai_quic_write_u32(encoded + offset,
+                                   sizeof(encoded) - offset,
+                                   &chunk,
+                                   AI_QUIC_VERSION_V1) == AI_QUIC_OK);
+  offset += chunk;
+  encoded[offset++] = 0xffu;
+
+  AI_QUIC_ASSERT(ai_quic_transport_params_decode(encoded, offset, &params) == AI_QUIC_ERROR);
+  return 0;
+}
+
+static int test_version_catalog_v2_retry_and_reserved(void) {
+  const ai_quic_version_ops_t *v1;
+  const ai_quic_version_ops_t *v2;
+  uint8_t first_byte;
+
+  v1 = ai_quic_version_ops_find(AI_QUIC_VERSION_V1);
+  v2 = ai_quic_version_ops_find(AI_QUIC_VERSION_V2);
+  AI_QUIC_ASSERT(v1 != NULL);
+  AI_QUIC_ASSERT(v2 != NULL);
+  AI_QUIC_ASSERT_EQ(v2->wire_version, AI_QUIC_VERSION_V2);
+  AI_QUIC_ASSERT_EQ(v2->initial_type_bits, 0x01u);
+  AI_QUIC_ASSERT_EQ(v2->zero_rtt_type_bits, 0x02u);
+  AI_QUIC_ASSERT_EQ(v2->handshake_type_bits, 0x03u);
+  AI_QUIC_ASSERT_EQ(v2->retry_type_bits, 0x00u);
+  AI_QUIC_ASSERT_EQ(v2->initial_salt[0], 0x0du);
+  AI_QUIC_ASSERT_EQ(v2->retry_integrity_secret[0], 0xc4u);
+  AI_QUIC_ASSERT_EQ(v2->retry_integrity_key[0], 0x8fu);
+  AI_QUIC_ASSERT_EQ(v2->retry_integrity_nonce[0], 0xd8u);
+  AI_QUIC_ASSERT(strcmp(v2->key_label, "quicv2 key") == 0);
+  AI_QUIC_ASSERT(strcmp(v2->iv_label, "quicv2 iv") == 0);
+  AI_QUIC_ASSERT(strcmp(v2->hp_label, "quicv2 hp") == 0);
+  AI_QUIC_ASSERT(strcmp(v2->ku_label, "quicv2 ku") == 0);
+  AI_QUIC_ASSERT(v1->retry_integrity_key[0] != v2->retry_integrity_key[0]);
+  AI_QUIC_ASSERT(ai_quic_version_reserved(0x1a2a3a4au));
+  AI_QUIC_ASSERT(!ai_quic_version_supported(0x1a2a3a4au));
+  AI_QUIC_ASSERT(ai_quic_version_compatible(AI_QUIC_VERSION_V1, AI_QUIC_VERSION_V2));
+  AI_QUIC_ASSERT(ai_quic_version_compatible(AI_QUIC_VERSION_V2, AI_QUIC_VERSION_V1));
+  AI_QUIC_ASSERT(!ai_quic_version_compatible(AI_QUIC_VERSION_V1, 0x1a2a3a4au));
+  AI_QUIC_ASSERT(ai_quic_version_encode_long_header_first_byte(
+                     AI_QUIC_VERSION_V2, AI_QUIC_PACKET_TYPE_INITIAL, 4u, &first_byte) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ((uint8_t)((first_byte >> 4u) & 0x03u), 0x01u);
+  return 0;
+}
+
+static int test_version_information_error_code_split(void) {
+  ai_quic_version_information_t client_vi;
+  ai_quic_version_information_t server_vi;
+  uint64_t error_code;
+
+  memset(&client_vi, 0, sizeof(client_vi));
+  client_vi.present = 1;
+  client_vi.chosen_version = AI_QUIC_VERSION_V1;
+  client_vi.available_versions[0] = AI_QUIC_VERSION_V2;
+  client_vi.available_versions_len = 1u;
+  error_code = 0u;
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_client_version_information(
+                     &client_vi, AI_QUIC_VERSION_V1, 1, &error_code) == AI_QUIC_ERROR);
+  AI_QUIC_ASSERT_EQ(error_code, AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER);
+
+  client_vi.available_versions[1] = AI_QUIC_VERSION_V1;
+  client_vi.available_versions_len = 2u;
+  error_code = 0u;
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_client_version_information(
+                     &client_vi, AI_QUIC_VERSION_V2, 1, &error_code) == AI_QUIC_ERROR);
+  AI_QUIC_ASSERT_EQ(error_code, AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION);
+
+  memset(&server_vi, 0, sizeof(server_vi));
+  server_vi.present = 1;
+  server_vi.chosen_version = AI_QUIC_VERSION_V2;
+  client_vi.available_versions[0] = AI_QUIC_VERSION_V1;
+  client_vi.available_versions_len = 1u;
+  error_code = 0u;
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_server_version_information(
+                     &server_vi,
+                     &client_vi,
+                     AI_QUIC_VERSION_V2,
+                     1,
+                     &error_code) == AI_QUIC_ERROR);
+  AI_QUIC_ASSERT_EQ(error_code, AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION);
+
+  client_vi.available_versions[0] = AI_QUIC_VERSION_V2;
+  client_vi.available_versions[1] = AI_QUIC_VERSION_V1;
+  client_vi.available_versions_len = 2u;
+  server_vi.chosen_version = AI_QUIC_VERSION_V1;
+  error_code = 0u;
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_server_version_information(
+                     &server_vi,
+                     &client_vi,
+                     AI_QUIC_VERSION_V2,
+                     1,
+                     &error_code) == AI_QUIC_ERROR);
+  AI_QUIC_ASSERT_EQ(error_code, AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION);
+
+  server_vi.chosen_version = AI_QUIC_VERSION_V2;
+  error_code = 0u;
+  AI_QUIC_ASSERT(ai_quic_transport_params_validate_server_version_information(
+                     &server_vi,
+                     &client_vi,
+                     AI_QUIC_VERSION_V2,
+                     1,
+                     &error_code) == AI_QUIC_OK);
+  return 0;
+}
+
+static int test_tls_cipher_policy_chacha20_fake_secret(void) {
+  ai_quic_tls_ctx_t *tls_ctx;
+  ai_quic_tls_session_t *session;
+  uint8_t secret[64];
+  size_t secret_len;
+  uint32_t cipher_suite;
+
+  AI_QUIC_ASSERT(strcmp(ai_quic_tls_cipher_policy_name(
+                            AI_QUIC_TLS_CIPHER_POLICY_DEFAULT),
+                        "default") == 0);
+  AI_QUIC_ASSERT(strcmp(ai_quic_tls_cipher_policy_name(
+                            AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY),
+                        "chacha20-only") == 0);
+  AI_QUIC_ASSERT(ai_quic_tls_cipher_policy_from_name("chacha20") ==
+                 AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY);
+  AI_QUIC_ASSERT(ai_quic_tls_cipher_policy_from_name("chacha20-only") ==
+                 AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY);
+  AI_QUIC_ASSERT(ai_quic_tls_cipher_policy_from_name("unknown") ==
+                 AI_QUIC_TLS_CIPHER_POLICY_DEFAULT);
+
+  tls_ctx = ai_quic_tls_ctx_create(NULL);
+  AI_QUIC_ASSERT(tls_ctx != NULL);
+  session = ai_quic_tls_session_create(tls_ctx,
+                                       0,
+                                       "hq-interop",
+                                       NULL,
+                                       AI_QUIC_TLS_CIPHER_POLICY_CHACHA20_ONLY);
+  AI_QUIC_ASSERT(session != NULL);
+  AI_QUIC_ASSERT(ai_quic_tls_session_get_packet_secret(session,
+                                                       AI_QUIC_ENCRYPTION_HANDSHAKE,
+                                                       1,
+                                                       &cipher_suite,
+                                                       secret,
+                                                       &secret_len,
+                                                       sizeof(secret)) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ((cipher_suite & 0xffffu), 0x1303u);
+  AI_QUIC_ASSERT(secret_len > 0u);
+  AI_QUIC_ASSERT(strcmp(ai_quic_tls_cipher_suite_name(cipher_suite),
+                        "TLS_CHACHA20_POLY1305_SHA256") == 0);
+
+  ai_quic_tls_session_destroy(session);
+  ai_quic_tls_ctx_destroy(tls_ctx);
+  return 0;
+}
+
+static int test_v2_long_header_roundtrip(void) {
+  ai_quic_packet_t packet;
+  ai_quic_packet_t decoded;
+  uint8_t datagram[AI_QUIC_MAX_PACKET_SIZE];
+  uint8_t first_byte;
+  size_t written;
+  size_t consumed;
+
+  memset(&packet, 0, sizeof(packet));
+  packet.header.type = AI_QUIC_PACKET_TYPE_INITIAL;
+  packet.header.version = AI_QUIC_VERSION_V1;
+  packet.header.packet_number = 7u;
+  AI_QUIC_ASSERT(ai_quic_random_cid(&packet.header.dcid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&packet.header.scid, 8u) == AI_QUIC_OK);
+  packet.frames[0].type = AI_QUIC_FRAME_PADDING;
+  packet.frame_count = 1u;
+  AI_QUIC_ASSERT(ai_quic_version_encode_long_header_first_byte(
+                     AI_QUIC_VERSION_V2, AI_QUIC_PACKET_TYPE_INITIAL, 4u, &first_byte) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ((uint8_t)((first_byte >> 4u) & 0x03u), 0x01u);
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&packet, datagram, sizeof(datagram), &written) ==
+                 AI_QUIC_OK);
+  datagram[0] = first_byte;
+  AI_QUIC_ASSERT(ai_quic_write_u32(datagram + 1u,
+                                   sizeof(datagram) - 1u,
+                                   &consumed,
+                                   AI_QUIC_VERSION_V2) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_packet_decode(datagram, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(consumed, written);
+  AI_QUIC_ASSERT_EQ(decoded.header.version, AI_QUIC_VERSION_V2);
+  AI_QUIC_ASSERT_EQ(decoded.header.type, AI_QUIC_PACKET_TYPE_INITIAL);
+  AI_QUIC_ASSERT_EQ(decoded.header.packet_number, 7u);
+
+  memset(&packet, 0, sizeof(packet));
+  packet.header.type = AI_QUIC_PACKET_TYPE_HANDSHAKE;
+  packet.header.version = AI_QUIC_VERSION_V1;
+  packet.header.packet_number = 9u;
+  AI_QUIC_ASSERT(ai_quic_random_cid(&packet.header.dcid, 8u) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_random_cid(&packet.header.scid, 8u) == AI_QUIC_OK);
+  packet.frames[0].type = AI_QUIC_FRAME_PADDING;
+  packet.frame_count = 1u;
+  AI_QUIC_ASSERT(ai_quic_version_encode_long_header_first_byte(
+                     AI_QUIC_VERSION_V2, AI_QUIC_PACKET_TYPE_HANDSHAKE, 4u, &first_byte) ==
+                 AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ((uint8_t)((first_byte >> 4u) & 0x03u), 0x03u);
+  AI_QUIC_ASSERT(ai_quic_packet_encode(&packet, datagram, sizeof(datagram), &written) ==
+                 AI_QUIC_OK);
+  datagram[0] = first_byte;
+  AI_QUIC_ASSERT(ai_quic_write_u32(datagram + 1u,
+                                   sizeof(datagram) - 1u,
+                                   &consumed,
+                                   AI_QUIC_VERSION_V2) == AI_QUIC_OK);
+  AI_QUIC_ASSERT(ai_quic_packet_decode(datagram, written, &consumed, &decoded) == AI_QUIC_OK);
+  AI_QUIC_ASSERT_EQ(decoded.header.version, AI_QUIC_VERSION_V2);
+  AI_QUIC_ASSERT_EQ(decoded.header.type, AI_QUIC_PACKET_TYPE_HANDSHAKE);
   return 0;
 }
 
@@ -696,7 +938,12 @@ static int test_stream_before_1rtt_rejected(void) {
 
   conn = (ai_quic_conn_impl_t *)ai_quic_conn_create(AI_QUIC_VERSION_V1, 1);
   AI_QUIC_ASSERT(conn != NULL);
-  AI_QUIC_ASSERT(ai_quic_conn_init_transport(conn, ai_quic_tls_ctx_create(NULL), NULL, "hq-interop", NULL) ==
+  AI_QUIC_ASSERT(ai_quic_conn_init_transport(conn,
+                                             ai_quic_tls_ctx_create(NULL),
+                                             NULL,
+                                             "hq-interop",
+                                             NULL,
+                                             AI_QUIC_TLS_CIPHER_POLICY_DEFAULT) ==
                  AI_QUIC_OK);
   memset(&packet, 0, sizeof(packet));
   packet.header.type = AI_QUIC_PACKET_TYPE_ONE_RTT;
@@ -727,6 +974,11 @@ int main(void) {
   AI_QUIC_ASSERT(test_qlog_json_seq_survives_early_read() == 0);
   AI_QUIC_ASSERT(test_pn_spaces_independent() == 0);
   AI_QUIC_ASSERT(test_transport_params_validation() == 0);
+  AI_QUIC_ASSERT(test_transport_params_reject_malformed_version_information() == 0);
+  AI_QUIC_ASSERT(test_version_catalog_v2_retry_and_reserved() == 0);
+  AI_QUIC_ASSERT(test_version_information_error_code_split() == 0);
+  AI_QUIC_ASSERT(test_tls_cipher_policy_chacha20_fake_secret() == 0);
+  AI_QUIC_ASSERT(test_v2_long_header_roundtrip() == 0);
   AI_QUIC_ASSERT(test_flow_control_frames_roundtrip() == 0);
   AI_QUIC_ASSERT(test_stream_reassembly_out_of_order() == 0);
   AI_QUIC_ASSERT(test_stream_overlap_duplicate_and_final_size() == 0);

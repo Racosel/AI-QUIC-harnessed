@@ -6,6 +6,7 @@
 
 #include "ai_quic/conn.h"
 #include "ai_quic/result.h"
+#include "ai_quic/tls.h"
 
 typedef enum ai_quic_endpoint_role {
   AI_QUIC_ENDPOINT_ROLE_CLIENT = 0,
@@ -23,6 +24,8 @@ typedef struct ai_quic_endpoint_config {
   const char *downloads_root;
   const char *cert_root;
   const char *alpn;
+  const char *testcase;
+  ai_quic_tls_cipher_policy_t cipher_policy;
   uint64_t idle_timeout_ms;
   size_t local_cid_len;
 } ai_quic_endpoint_config_t;

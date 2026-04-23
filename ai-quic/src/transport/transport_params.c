@@ -14,6 +14,7 @@
 #define AI_QUIC_TP_DISABLE_ACTIVE_MIGRATION 0x0cu
 #define AI_QUIC_TP_INITIAL_SOURCE_CONNECTION_ID 0x0fu
 #define AI_QUIC_TP_RETRY_SOURCE_CONNECTION_ID 0x10u
+#define AI_QUIC_TP_VERSION_INFORMATION 0x11u
 
 static ai_quic_result_t ai_quic_transport_params_write_varint_param(
     uint8_t *buffer,
@@ -108,6 +109,60 @@ static ai_quic_result_t ai_quic_transport_params_parse_cid(
     return AI_QUIC_ERROR;
   }
   return ai_quic_cid_from_bytes(cid, value, value_len) ? AI_QUIC_OK : AI_QUIC_ERROR;
+}
+
+static ai_quic_result_t ai_quic_transport_params_write_version_information(
+    uint8_t *buffer,
+    size_t capacity,
+    size_t *offset,
+    const ai_quic_version_information_t *version_information) {
+  size_t chunk;
+  size_t value_len_field;
+  size_t i;
+  size_t value_len;
+
+  if (buffer == NULL || offset == NULL || version_information == NULL ||
+      !version_information->present || version_information->chosen_version == 0u ||
+      version_information->available_versions_len > AI_QUIC_MAX_VERSION_INFORMATION_VERSIONS) {
+    return AI_QUIC_ERROR;
+  }
+
+  value_len = (1u + version_information->available_versions_len) * sizeof(uint32_t);
+  if (ai_quic_varint_write(
+          buffer + *offset, capacity - *offset, &chunk, AI_QUIC_TP_VERSION_INFORMATION) !=
+          AI_QUIC_OK ||
+      capacity - *offset - chunk < ai_quic_varint_size(value_len) + value_len) {
+    return AI_QUIC_ERROR;
+  }
+  *offset += chunk;
+
+  if (ai_quic_varint_write(buffer + *offset,
+                           capacity - *offset,
+                           &value_len_field,
+                           value_len) != AI_QUIC_OK) {
+    return AI_QUIC_ERROR;
+  }
+  *offset += value_len_field;
+
+  if (ai_quic_write_u32(buffer + *offset,
+                        capacity - *offset,
+                        &chunk,
+                        version_information->chosen_version) != AI_QUIC_OK) {
+    return AI_QUIC_ERROR;
+  }
+  *offset += chunk;
+
+  for (i = 0u; i < version_information->available_versions_len; ++i) {
+    if (version_information->available_versions[i] == 0u ||
+        ai_quic_write_u32(buffer + *offset,
+                          capacity - *offset,
+                          &chunk,
+                          version_information->available_versions[i]) != AI_QUIC_OK) {
+      return AI_QUIC_ERROR;
+    }
+    *offset += chunk;
+  }
+  return AI_QUIC_OK;
 }
 
 void ai_quic_transport_params_init(ai_quic_transport_params_t *params) {
@@ -211,6 +266,11 @@ ai_quic_result_t ai_quic_transport_params_encode(
           params->retry_source_connection_id.len) != AI_QUIC_OK) {
     return AI_QUIC_ERROR;
   }
+  if (params->version_information.present &&
+      ai_quic_transport_params_write_version_information(
+          buffer, capacity, &offset, &params->version_information) != AI_QUIC_OK) {
+    return AI_QUIC_ERROR;
+  }
 
   *written = offset;
   return AI_QUIC_OK;
@@ -309,6 +369,41 @@ ai_quic_result_t ai_quic_transport_params_decode(
         }
         params->has_retry_source_connection_id = 1;
         break;
+      case AI_QUIC_TP_VERSION_INFORMATION:
+        if (value_len < sizeof(uint32_t) || (value_len % sizeof(uint32_t)) != 0u ||
+            ((value_len / sizeof(uint32_t)) - 1u) >
+                AI_QUIC_MAX_VERSION_INFORMATION_VERSIONS) {
+          return AI_QUIC_ERROR;
+        }
+        if (ai_quic_read_u32(buffer + offset,
+                             (size_t)value_len,
+                             &consumed,
+                             &params->version_information.chosen_version) != AI_QUIC_OK ||
+            params->version_information.chosen_version == 0u) {
+          return AI_QUIC_ERROR;
+        }
+        params->version_information.present = 1;
+        params->version_information.available_versions_len =
+            (size_t)(value_len / sizeof(uint32_t)) - 1u;
+        {
+          size_t i;
+          size_t read_offset;
+          uint32_t version;
+
+          read_offset = offset + consumed;
+          for (i = 0u; i < params->version_information.available_versions_len; ++i) {
+            if (ai_quic_read_u32(buffer + read_offset,
+                                 (size_t)value_len - (read_offset - offset),
+                                 &consumed,
+                                 &version) != AI_QUIC_OK ||
+                version == 0u) {
+              return AI_QUIC_ERROR;
+            }
+            params->version_information.available_versions[i] = version;
+            read_offset += consumed;
+          }
+        }
+        break;
       default:
         break;
     }
@@ -347,6 +442,57 @@ ai_quic_result_t ai_quic_transport_params_validate_server(
     return AI_QUIC_ERROR;
   }
   if (!ai_quic_cid_equal(&params->initial_source_connection_id, peer_scid)) {
+    return AI_QUIC_ERROR;
+  }
+  return AI_QUIC_OK;
+}
+
+ai_quic_result_t ai_quic_transport_params_validate_client_version_information(
+    const ai_quic_version_information_t *version_information,
+    ai_quic_version_t packet_version,
+    int require_present,
+    uint64_t *transport_error_code) {
+  if (transport_error_code != NULL) {
+    *transport_error_code = AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION;
+  }
+  if (version_information == NULL || !version_information->present) {
+    return require_present ? AI_QUIC_ERROR : AI_QUIC_OK;
+  }
+  if (!ai_quic_version_information_contains(version_information,
+                                            version_information->chosen_version)) {
+    if (transport_error_code != NULL) {
+      *transport_error_code = AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER;
+    }
+    return AI_QUIC_ERROR;
+  }
+  if (version_information->chosen_version != packet_version) {
+    if (transport_error_code != NULL) {
+      *transport_error_code = AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION;
+    }
+    return AI_QUIC_ERROR;
+  }
+  return AI_QUIC_OK;
+}
+
+ai_quic_result_t ai_quic_transport_params_validate_server_version_information(
+    const ai_quic_version_information_t *server_version_information,
+    const ai_quic_version_information_t *client_version_information,
+    ai_quic_version_t negotiated_version,
+    int require_present,
+    uint64_t *transport_error_code) {
+  if (transport_error_code != NULL) {
+    *transport_error_code = AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION;
+  }
+  if (server_version_information == NULL || !server_version_information->present) {
+    return require_present ? AI_QUIC_ERROR : AI_QUIC_OK;
+  }
+  if (client_version_information == NULL ||
+      !ai_quic_version_information_contains(client_version_information,
+                                            server_version_information->chosen_version) ||
+      server_version_information->chosen_version != negotiated_version) {
+    if (transport_error_code != NULL) {
+      *transport_error_code = AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION;
+    }
     return AI_QUIC_ERROR;
   }
   return AI_QUIC_OK;

@@ -65,6 +65,7 @@ target_link_libraries(
 add_library(
   ai_quic_tls
   STATIC
+  src/tls/boringssl_compat.cc
   src/tls/initial_secret.c
   src/tls/key_schedule.c
   src/tls/keyset.c
@@ -118,6 +119,7 @@ add_library(
   src/transport/stream.c
   src/transport/timer.c
   src/transport/transport_params.c
+  src/transport/version.c
   src/transport/version_negotiation.c
 )
 

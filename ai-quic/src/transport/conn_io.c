@@ -41,6 +41,13 @@ static void ai_quic_conn_on_ack_frame(ai_quic_conn_impl_t *conn,
                                       ai_quic_packet_number_space_id_t space_id,
                                       const ai_quic_ack_frame_t *ack,
                                       uint64_t now_ms);
+static void ai_quic_conn_seed_version_information(ai_quic_conn_impl_t *conn);
+static void ai_quic_conn_activate_version(ai_quic_conn_impl_t *conn,
+                                          ai_quic_version_t version);
+static ai_quic_result_t ai_quic_conn_fail_with_transport_error(
+    ai_quic_conn_impl_t *conn,
+    uint64_t error_code,
+    const char *reason);
 
 static const char *ai_quic_qlog_packet_type_name(ai_quic_packet_type_t type) {
   switch (type) {
@@ -84,6 +91,175 @@ static const char *ai_quic_tls_event_name(ai_quic_tls_event_type_t type) {
     default:
       return "none";
   }
+}
+
+static void ai_quic_conn_seed_version_information(ai_quic_conn_impl_t *conn) {
+  ai_quic_version_information_t *version_information;
+  int include_v2;
+
+  if (conn == NULL) {
+    return;
+  }
+
+  version_information = &conn->local_transport_params.version_information;
+  memset(version_information, 0, sizeof(*version_information));
+  include_v2 = conn->compatible_v2_enabled || conn->original_version == AI_QUIC_VERSION_V2 ||
+               conn->negotiated_version == AI_QUIC_VERSION_V2;
+  if (include_v2) {
+    if (conn->is_server) {
+      version_information->chosen_version =
+          conn->peer_version_information_validated || !conn->compatible_v2_enabled
+              ? conn->negotiated_version
+              : AI_QUIC_VERSION_V2;
+      version_information->available_versions[0] = AI_QUIC_VERSION_V1;
+      version_information->available_versions[1] = AI_QUIC_VERSION_V2;
+      version_information->available_versions_len = 2u;
+    } else {
+      version_information->chosen_version = conn->original_version;
+      version_information->available_versions[0] = AI_QUIC_VERSION_V2;
+      version_information->available_versions[1] = AI_QUIC_VERSION_V1;
+      version_information->available_versions_len = 2u;
+    }
+  } else {
+    version_information->chosen_version =
+        conn->negotiated_version != 0u ? conn->negotiated_version
+                                       : AI_QUIC_VERSION_V1;
+    version_information->available_versions[0] = AI_QUIC_VERSION_V1;
+    version_information->available_versions_len = 1u;
+  }
+  version_information->present = version_information->chosen_version != 0u;
+}
+
+static void ai_quic_conn_activate_version(ai_quic_conn_impl_t *conn,
+                                          ai_quic_version_t version) {
+  if (conn == NULL || version == 0u) {
+    return;
+  }
+
+  conn->version = version;
+  conn->negotiated_version = version;
+  conn->negotiated_version_learned = 1;
+  if (conn->is_server) {
+    conn->local_transport_params.version_information.chosen_version = version;
+  }
+  ai_quic_log_write(AI_QUIC_LOG_INFO,
+                    "conn_io",
+                    "activate negotiated version original=0x%08x negotiated=0x%08x is_server=%d",
+                    (unsigned)conn->original_version,
+                    (unsigned)conn->negotiated_version,
+                    conn->is_server);
+}
+
+static ai_quic_result_t ai_quic_conn_fail_with_transport_error(
+    ai_quic_conn_impl_t *conn,
+    uint64_t error_code,
+    const char *reason) {
+  if (conn == NULL) {
+    return AI_QUIC_ERROR;
+  }
+  conn->state = AI_QUIC_CONN_STATE_CLOSING;
+  conn->close_error_code_set = 1;
+  conn->close_error_code = error_code;
+  ai_quic_set_error(conn->last_error,
+                    sizeof(conn->last_error),
+                    "transport_error=0x%llx reason=%s",
+                    (unsigned long long)error_code,
+                    reason != NULL ? reason : "unknown");
+  return AI_QUIC_ERROR;
+}
+
+static ai_quic_version_t ai_quic_conn_select_negotiated_version(
+    const ai_quic_conn_impl_t *conn,
+    const ai_quic_version_information_t *client_version_information) {
+  ai_quic_version_t candidates[2];
+  size_t candidate_count;
+  size_t i;
+
+  if (conn == NULL || client_version_information == NULL ||
+      !client_version_information->present) {
+    return conn != NULL ? conn->original_version : 0u;
+  }
+
+  candidate_count = 0u;
+  if (conn->compatible_v2_enabled) {
+    candidates[candidate_count++] = AI_QUIC_VERSION_V2;
+  }
+  candidates[candidate_count++] = conn->original_version;
+
+  for (i = 0u; i < candidate_count; ++i) {
+    ai_quic_version_t candidate = candidates[i];
+    if (candidate != 0u && ai_quic_version_supported(candidate) &&
+        !ai_quic_version_reserved(candidate) &&
+        ai_quic_version_compatible(conn->original_version, candidate) &&
+        ai_quic_version_information_contains(client_version_information, candidate)) {
+      return candidate;
+    }
+  }
+  return 0u;
+}
+
+static ai_quic_result_t ai_quic_conn_validate_client_version_information(
+    ai_quic_conn_impl_t *conn,
+    ai_quic_version_t packet_version) {
+  uint64_t error_code;
+  ai_quic_version_t selected;
+  int require_present;
+
+  if (conn == NULL) {
+    return AI_QUIC_ERROR;
+  }
+
+  require_present = conn->compatible_v2_enabled ||
+                    conn->original_version == AI_QUIC_VERSION_V2;
+  if (ai_quic_transport_params_validate_client_version_information(
+          &conn->peer_transport_params.version_information,
+          packet_version,
+          require_present,
+          &error_code) != AI_QUIC_OK) {
+    return ai_quic_conn_fail_with_transport_error(
+        conn, error_code, "invalid client version_information");
+  }
+  if (!conn->peer_transport_params.version_information.present) {
+    conn->peer_version_information_validated = 1;
+    return AI_QUIC_OK;
+  }
+
+  selected = ai_quic_conn_select_negotiated_version(
+      conn, &conn->peer_transport_params.version_information);
+  if (selected == 0u) {
+    return ai_quic_conn_fail_with_transport_error(
+        conn,
+        AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION,
+        "no compatible version in client version_information");
+  }
+
+  conn->peer_version_information_validated = 1;
+  ai_quic_conn_activate_version(conn, selected);
+  ai_quic_conn_seed_version_information(conn);
+  return AI_QUIC_OK;
+}
+
+static ai_quic_result_t ai_quic_conn_validate_server_version_information(
+    ai_quic_conn_impl_t *conn) {
+  uint64_t error_code;
+  int require_present;
+
+  if (conn == NULL) {
+    return AI_QUIC_ERROR;
+  }
+  require_present = conn->compatible_v2_enabled ||
+                    conn->negotiated_version == AI_QUIC_VERSION_V2;
+  if (ai_quic_transport_params_validate_server_version_information(
+          &conn->peer_transport_params.version_information,
+          &conn->local_transport_params.version_information,
+          conn->negotiated_version,
+          require_present,
+          &error_code) != AI_QUIC_OK) {
+    return ai_quic_conn_fail_with_transport_error(
+        conn, error_code, "invalid server version_information");
+  }
+  conn->peer_version_information_validated = 1;
+  return AI_QUIC_OK;
 }
 
 static int ai_quic_flow_crossed_progress_step(uint64_t before, uint64_t after) {
@@ -1624,14 +1800,15 @@ ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
                                              ai_quic_tls_ctx_t *tls_ctx,
                                              ai_quic_qlog_writer_t *qlog,
                                              const char *alpn,
-                                             const char *keylog_path) {
+                                             const char *keylog_path,
+                                             ai_quic_tls_cipher_policy_t cipher_policy) {
   if (conn == NULL || tls_ctx == NULL) {
     return AI_QUIC_ERROR;
   }
 
   conn->qlog = qlog;
   conn->tls_session = ai_quic_tls_session_create(
-      tls_ctx, conn->is_server, alpn, keylog_path);
+      tls_ctx, conn->is_server, alpn, keylog_path, cipher_policy);
   if (conn->tls_session == NULL) {
     ai_quic_set_error(conn->last_error, sizeof(conn->last_error), "%s", "tls session create failed");
     return AI_QUIC_ERROR;
@@ -1658,6 +1835,7 @@ ai_quic_result_t ai_quic_conn_start_client(ai_quic_conn_impl_t *conn,
   conn->state = AI_QUIC_CONN_STATE_HANDSHAKING;
   conn->local_transport_params.initial_source_connection_id = conn->local_cid;
   conn->local_transport_params.has_original_destination_connection_id = 0;
+  ai_quic_conn_seed_version_information(conn);
   ai_quic_pn_space_mark_key_installed(ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_INITIAL));
   conn->conn_flow.initial_window = conn->local_transport_params.initial_max_data;
   conn->conn_flow.recv_limit = conn->local_transport_params.initial_max_data;
@@ -1772,7 +1950,12 @@ static ai_quic_result_t ai_quic_conn_on_crypto(ai_quic_conn_impl_t *conn,
     if (ai_quic_transport_params_validate_client(&conn->peer_transport_params,
                                                  &conn->original_destination_cid,
                                                  &packet->header.scid) != AI_QUIC_OK) {
-      ai_quic_set_error(conn->last_error, sizeof(conn->last_error), "%s", "client TP validation failed");
+      return ai_quic_conn_fail_with_transport_error(
+          conn,
+          AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER,
+          "client TP validation failed");
+    }
+    if (ai_quic_conn_validate_server_version_information(conn) != AI_QUIC_OK) {
       return AI_QUIC_ERROR;
     }
     conn->peer_transport_params_validated = 1;
@@ -1782,7 +1965,13 @@ static ai_quic_result_t ai_quic_conn_on_crypto(ai_quic_conn_impl_t *conn,
       !conn->peer_transport_params_validated) {
     if (ai_quic_transport_params_validate_server(&conn->peer_transport_params,
                                                  &packet->header.scid) != AI_QUIC_OK) {
-      ai_quic_set_error(conn->last_error, sizeof(conn->last_error), "%s", "server TP validation failed");
+      return ai_quic_conn_fail_with_transport_error(
+          conn,
+          AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER,
+          "server TP validation failed");
+    }
+    if (ai_quic_conn_validate_client_version_information(conn, packet->header.version) !=
+        AI_QUIC_OK) {
       return AI_QUIC_ERROR;
     }
     conn->peer_transport_params_validated = 1;
@@ -1892,9 +2081,27 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
     conn->peer_cid = packet->header.scid;
     conn->saw_first_server_initial = 1;
   }
+  if (!conn->is_server && packet->header.version != 0u &&
+      packet->header.version != conn->version &&
+      (packet->header.type == AI_QUIC_PACKET_TYPE_INITIAL ||
+       packet->header.type == AI_QUIC_PACKET_TYPE_HANDSHAKE)) {
+    if (!ai_quic_version_information_contains(
+            &conn->local_transport_params.version_information,
+            packet->header.version) ||
+        !ai_quic_version_compatible(conn->original_version, packet->header.version)) {
+      return ai_quic_conn_fail_with_transport_error(
+          conn,
+          AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION,
+          "server long header used incompatible version");
+    }
+    ai_quic_conn_activate_version(conn, packet->header.version);
+  }
 
   if (conn->is_server && conn->state == AI_QUIC_CONN_STATE_PRE_VALIDATION) {
     conn->state = AI_QUIC_CONN_STATE_HANDSHAKING;
+    conn->version = packet->header.version;
+    conn->original_version = packet->header.version;
+    conn->negotiated_version = packet->header.version;
     conn->peer_cid = packet->header.scid;
     conn->original_destination_cid = packet->header.dcid;
     ai_quic_random_cid(&conn->local_cid, 8u);
@@ -1902,6 +2109,7 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
     conn->local_transport_params.original_destination_connection_id =
         conn->original_destination_cid;
     conn->local_transport_params.has_original_destination_connection_id = 1;
+    ai_quic_conn_seed_version_information(conn);
     ai_quic_pn_space_mark_key_installed(ai_quic_conn_space(conn, AI_QUIC_PN_SPACE_INITIAL));
     if (ai_quic_tls_session_start(conn->tls_session,
                                   &conn->local_transport_params,
@@ -1915,6 +2123,17 @@ ai_quic_result_t ai_quic_conn_on_packet(ai_quic_conn_impl_t *conn,
   if (packet->header.type == AI_QUIC_PACKET_TYPE_ONE_RTT && !conn->can_send_1rtt) {
     ai_quic_set_error(conn->last_error, sizeof(conn->last_error), "%s", "received 1-RTT before ready");
     return AI_QUIC_ERROR;
+  }
+
+  if (packet->header.type == AI_QUIC_PACKET_TYPE_HANDSHAKE &&
+      conn->negotiated_version_learned &&
+      packet->header.version != conn->negotiated_version) {
+    ai_quic_log_write(AI_QUIC_LOG_INFO,
+                      "conn_io",
+                      "drop handshake packet with non-negotiated version got=0x%08x negotiated=0x%08x",
+                      (unsigned)packet->header.version,
+                      (unsigned)conn->negotiated_version);
+    return AI_QUIC_OK;
   }
 
   if (packet->header.type == AI_QUIC_PACKET_TYPE_INITIAL) {

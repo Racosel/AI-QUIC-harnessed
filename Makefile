@@ -1,4 +1,4 @@
-.PHONY: help build test-unit test-integration test-interop-handshake test-interop-transfer ai-quic-interop-image quic-demo-server quic-demo-client interop-ai-server interop-ai-client interop-handshake-server interop-handshake-client interop-transfer-server interop-transfer-client interop-repeat interop-run interop-handshake-smoke interop-versionnegotiation interop-logs clean clean-test-logs
+.PHONY: help build test-unit test-integration test-interop-handshake test-interop-transfer test-interop-v2 test-interop-chacha20 ai-quic-interop-image quic-demo-server quic-demo-client interop-ai-server interop-ai-client interop-handshake-server interop-handshake-client interop-transfer-server interop-transfer-client interop-v2-server interop-v2-client interop-chacha20-server interop-chacha20-client interop-repeat interop-run interop-handshake-smoke interop-versionnegotiation interop-logs clean clean-test-logs
 
 AI_QUIC_DIR := ai-quic
 AI_QUIC_BUILD_DIR := $(AI_QUIC_DIR)/build
@@ -20,6 +20,8 @@ help:
 	@echo "  make test-integration                    # run local integration tests"
 	@echo "  make test-interop-handshake              # run handshake interop serially, both directions 5 times each"
 	@echo "  make test-interop-transfer               # run transfer interop serially, both directions 5 times each"
+	@echo "  make test-interop-v2                     # run runner-based ai-quic <-> ai-quic v2 validation"
+	@echo "  make test-interop-chacha20               # run runner-based ai-quic <-> ai-quic chacha20 validation"
 	@echo "  make ai-quic-interop-image               # build ai-quic-interop:latest docker image"
 	@echo "  make quic-demo-server                    # run ai_quic_demo_server --help"
 	@echo "  make quic-demo-client                    # run ai_quic_demo_client --help"
@@ -27,6 +29,10 @@ help:
 	@echo "  make interop-handshake-client            # xquic server vs ai-quic client, repeated 5 times"
 	@echo "  make interop-transfer-server             # ai-quic server vs xquic client for transfer, repeated 5 times"
 	@echo "  make interop-transfer-client             # xquic server vs ai-quic client for transfer, repeated 5 times"
+	@echo "  make interop-v2-server                   # ai-quic server vs xquic client for v2"
+	@echo "  make interop-v2-client                   # xquic server vs ai-quic client for v2"
+	@echo "  make interop-chacha20-server             # ai-quic server vs xquic client for chacha20"
+	@echo "  make interop-chacha20-client             # xquic server vs ai-quic client for chacha20"
 	@echo "  make interop-handshake-smoke             # local ai-quic <-> ai-quic handshake smoke test"
 	@echo "  make interop-versionnegotiation          # local version negotiation smoke test"
 	@echo "  make interop-run SERVER=x CLIENT=y TESTCASE=z [INTEROP_DEBUG=1]"
@@ -51,7 +57,13 @@ test-interop-transfer: ai-quic-interop-image
 	@$(MAKE) interop-repeat SERVER=ai-quic CLIENT=xquic TESTCASE=transfer INTEROP_DEBUG=$(INTEROP_DEBUG)
 	@$(MAKE) interop-repeat SERVER=xquic CLIENT=ai-quic TESTCASE=transfer INTEROP_DEBUG=$(INTEROP_DEBUG)
 
-ai-quic-interop-image:
+test-interop-v2: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=ai-quic CLIENT=ai-quic TESTCASE=v2 INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+test-interop-chacha20: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=ai-quic CLIENT=ai-quic TESTCASE=chacha20 INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+ai-quic-interop-image: build
 	@docker build -f "$(AI_QUIC_DIR)/interop/Dockerfile" -t "$(AI_QUIC_IMAGE)" .
 
 quic-demo-server: build
@@ -71,6 +83,18 @@ interop-transfer-server: ai-quic-interop-image
 
 interop-transfer-client: ai-quic-interop-image
 	@$(MAKE) interop-repeat SERVER=xquic CLIENT=ai-quic TESTCASE=transfer INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+interop-v2-server: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=ai-quic CLIENT=xquic TESTCASE=v2 INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+interop-v2-client: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=xquic CLIENT=ai-quic TESTCASE=v2 INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+interop-chacha20-server: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=ai-quic CLIENT=xquic TESTCASE=chacha20 INTEROP_DEBUG=$(INTEROP_DEBUG)
+
+interop-chacha20-client: ai-quic-interop-image
+	@$(MAKE) interop-repeat SERVER=xquic CLIENT=ai-quic TESTCASE=chacha20 INTEROP_DEBUG=$(INTEROP_DEBUG)
 
 interop-handshake-smoke: build
 	@/bin/bash "$(AI_QUIC_DIR)/tests/interop/test_local_handshake.sh"

@@ -20,6 +20,8 @@
 #define AI_QUIC_MAX_HTTP_BUFFER_LEN 8192u
 #define AI_QUIC_MAX_TRACKED_SENT_PACKETS 2048u
 #define AI_QUIC_MAX_TRACKED_PACKET_STREAM_FRAMES 4u
+#define AI_QUIC_TRANSPORT_ERROR_TRANSPORT_PARAMETER 0x08u
+#define AI_QUIC_TRANSPORT_ERROR_VERSION_NEGOTIATION 0x11u
 
 typedef struct ai_quic_pending_datagram {
   size_t len;
@@ -72,9 +74,28 @@ typedef struct ai_quic_loss_state {
   ai_quic_sent_packet_t sent_packets[AI_QUIC_MAX_TRACKED_SENT_PACKETS];
 } ai_quic_loss_state_t;
 
+typedef struct ai_quic_version_ops {
+  ai_quic_version_t wire_version;
+  const char *name;
+  uint8_t initial_type_bits;
+  uint8_t zero_rtt_type_bits;
+  uint8_t handshake_type_bits;
+  uint8_t retry_type_bits;
+  uint8_t initial_salt[20];
+  uint8_t retry_integrity_secret[32];
+  uint8_t retry_integrity_key[16];
+  uint8_t retry_integrity_nonce[12];
+  const char *key_label;
+  const char *iv_label;
+  const char *hp_label;
+  const char *ku_label;
+} ai_quic_version_ops_t;
+
 typedef struct ai_quic_conn {
   int is_server;
   ai_quic_version_t version;
+  ai_quic_version_t original_version;
+  ai_quic_version_t negotiated_version;
   ai_quic_conn_state_t state;
   ai_quic_cid_t local_cid;
   ai_quic_cid_t peer_cid;
@@ -102,6 +123,11 @@ typedef struct ai_quic_conn {
   int peer_transport_params_validated;
   int should_send_handshake_done;
   int saw_first_server_initial;
+  int compatible_v2_enabled;
+  int negotiated_version_learned;
+  int peer_version_information_validated;
+  int close_error_code_set;
+  uint64_t close_error_code;
   size_t total_request_streams;
   size_t completed_request_streams;
   char last_error[256];
@@ -121,6 +147,30 @@ typedef struct ai_quic_endpoint {
   char authority[256];
   char request_path[512];
 } ai_quic_endpoint_impl_t;
+
+const ai_quic_version_ops_t *ai_quic_version_ops_find(ai_quic_version_t version);
+size_t ai_quic_version_supported_list(ai_quic_version_t *versions, size_t capacity);
+size_t ai_quic_version_offered_list(ai_quic_version_t *versions, size_t capacity);
+size_t ai_quic_version_fully_deployed_list(ai_quic_version_t *versions,
+                                           size_t capacity);
+int ai_quic_version_supported(ai_quic_version_t version);
+int ai_quic_version_reserved(ai_quic_version_t version);
+int ai_quic_version_compatible(ai_quic_version_t from, ai_quic_version_t to);
+int ai_quic_version_information_contains(
+    const ai_quic_version_information_t *version_information,
+    ai_quic_version_t version);
+size_t ai_quic_dispatcher_offered_versions(
+    const ai_quic_dispatcher_t *dispatcher,
+    ai_quic_version_t *versions,
+    size_t capacity);
+ai_quic_packet_type_t ai_quic_version_decode_long_header_type(
+    ai_quic_version_t version,
+    uint8_t first_byte);
+ai_quic_result_t ai_quic_version_encode_long_header_first_byte(
+    ai_quic_version_t version,
+    ai_quic_packet_type_t type,
+    uint8_t pn_len,
+    uint8_t *first_byte);
 
 void ai_quic_set_error(char *buffer, size_t capacity, const char *format, ...);
 ai_quic_packet_number_space_t *ai_quic_conn_space(ai_quic_conn_impl_t *conn,
@@ -211,6 +261,17 @@ ai_quic_result_t ai_quic_transport_params_validate_client(
 ai_quic_result_t ai_quic_transport_params_validate_server(
     const ai_quic_transport_params_t *params,
     const ai_quic_cid_t *peer_scid);
+ai_quic_result_t ai_quic_transport_params_validate_client_version_information(
+    const ai_quic_version_information_t *version_information,
+    ai_quic_version_t packet_version,
+    int require_present,
+    uint64_t *transport_error_code);
+ai_quic_result_t ai_quic_transport_params_validate_server_version_information(
+    const ai_quic_version_information_t *server_version_information,
+    const ai_quic_version_information_t *client_version_information,
+    ai_quic_version_t negotiated_version,
+    int require_present,
+    uint64_t *transport_error_code);
 
 void ai_quic_build_ack_frame(const ai_quic_packet_number_space_t *space,
                              ai_quic_frame_t *frame);
@@ -276,7 +337,8 @@ ai_quic_result_t ai_quic_conn_init_transport(ai_quic_conn_impl_t *conn,
                                              ai_quic_tls_ctx_t *tls_ctx,
                                              ai_quic_qlog_writer_t *qlog,
                                              const char *alpn,
-                                             const char *keylog_path);
+                                             const char *keylog_path,
+                                             ai_quic_tls_cipher_policy_t cipher_policy);
 ai_quic_result_t ai_quic_conn_start_client(ai_quic_conn_impl_t *conn,
                                            const char *authority,
                                            const char *request_path);
